@@ -1,0 +1,6 @@
+# Normalise line endings in the repository; Windows scripts keep CRLF in the working tree.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.png binary
+*.whl binary

@@ -1,0 +1,140 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' file:; style-src 'unsafe-inline' file:; img-src data: file:; font-src data: file:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<link rel="stylesheet" href="xterm.css">
+<style>
+  :root { --bg: __BACKGROUND__; --surface: __SURFACE__; --text: __TEXT__; --accent: __ACCENT__; --thumb: __THUMB__; }
+  html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
+  #t { position: absolute; left: 10px; right: 4px; top: 8px; bottom: 4px; }
+  .xterm .xterm-viewport { background-color: transparent !important; }
+  .xterm-viewport::-webkit-scrollbar { width: 10px; }
+  .xterm-viewport::-webkit-scrollbar-thumb { background: var(--thumb); border-radius: 5px; }
+  .xterm-viewport::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+  /* Text being composed with an input method (注音, 倉頡…): readable, in the terminal's own colours and font. */
+  .xterm .composition-view {
+    background: var(--surface); color: var(--text); border-bottom: 2px solid var(--accent);
+    padding: 0 2px; border-radius: 2px; z-index: 5;
+  }
+</style>
+<script src="xterm.js"></script>
+<script src="addon-fit.js"></script>
+<script src="addon-unicode11.js"></script>
+<script src="addon-webgl.js"></script>
+<script>__QWEBCHANNEL__</script>
+</head>
+<body>
+<div id="t"></div>
+<script>
+(function () {
+  var theme = __THEME__;
+  var term = new Terminal({
+    fontFamily: '"Cascadia Mono","Cascadia Code",Consolas,"Sarasa Mono TC","Microsoft JhengHei UI","Noto Sans Mono CJK TC","Noto Sans TC",monospace',
+    fontSize: __FONT_SIZE__,
+    lineHeight: 1.2,
+    cursorBlink: __CURSOR_BLINK__,
+    scrollback: 10000,
+    allowProposedApi: true,
+    theme: theme,
+    drawBoldTextInBrightColors: true,
+    rightClickSelectsWord: false,
+    scrollOnUserInput: true,
+    // Output passes through a Windows pseudo console, which re-wraps lines itself; tell xterm.js so it does not also reflow.
+    windowsPty: { backend: 'conpty', buildNumber: __WINDOWS_BUILD__ }
+  });
+  var fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.loadAddon(new Unicode11Addon.Unicode11Addon());
+  term.unicode.activeVersion = '11';
+  term.open(document.getElementById('t'));
+  // The DOM renderer is the default: inside Qt WebEngine on Windows the WebGL canvas can present half-drawn frames,
+  // which show up as black triangles while the program redraws. WebGL is opt-in (VIBE_TERMINAL_WEBGL=1).
+  if (__WEBGL__) {
+    try {
+      var gl = new WebglAddon.WebglAddon();
+      gl.onContextLoss(function () { gl.dispose(); });
+      term.loadAddon(gl);
+    } catch (e) { /* the DOM renderer is the fallback */ }
+  }
+
+  function refit() { try { fit.fit(); } catch (e) {} }
+
+  // Python sends one bounded batch at a time; acknowledge only after xterm has parsed it.
+
+  // Resizing re-wraps the pseudo console and makes the program redraw the whole screen; do it once the size settles.
+  var resizeTimer = 0;
+  function refitSoon() { clearTimeout(resizeTimer); resizeTimer = setTimeout(refit, 70); }
+
+  function setChrome(c) {
+    var root = document.documentElement.style;
+    root.setProperty('--bg', c.bg); root.setProperty('--surface', c.surface);
+    root.setProperty('--text', c.text); root.setProperty('--accent', c.accent); root.setProperty('--thumb', c.thumb);
+  }
+
+  // Chords the app handles itself. Everything else goes to the program in the terminal (Ctrl+B is tmux's prefix).
+  function chordName(e) {
+    if (e.ctrlKey && !e.altKey && e.key === 'Tab') return e.shiftKey ? 'prev' : 'next';
+    if (e.altKey && !e.ctrlKey && !e.shiftKey && /^[1-9]$/.test(e.key)) return 'goto:' + e.key;
+    if (e.ctrlKey && e.shiftKey && !e.altKey) {
+      switch (e.code) {
+        case 'KeyK': return 'palette';
+        case 'KeyD': return 'detach';
+        case 'KeyW': return 'close';
+        case 'KeyT': return 'new';
+        case 'KeyE': return 'composer';
+      }
+    }
+    return null;
+  }
+
+  new QWebChannel(qt.webChannelTransport, function (channel) {
+    var bridge = channel.objects.bridge;
+    term.attachCustomKeyEventHandler(function (e) {
+      if (e.type !== 'keydown' || e.isComposing) return true;
+      var chord = chordName(e);
+      if (chord) { e.preventDefault(); bridge.chord(chord); return false; }
+      // Copy: Ctrl+Shift+C, or plain Ctrl+C while text is selected (otherwise Ctrl+C interrupts the program)
+      if (e.ctrlKey && !e.altKey && e.code === 'KeyC' && term.hasSelection()) {
+        bridge.copy(term.getSelection());
+        term.clearSelection();
+        return false;
+      }
+      return true;
+    });
+    term.onData(function (d) { bridge.input(d); });
+    term.onBinary(function (d) { bridge.binary(d); });
+    term.onResize(function (s) { bridge.resized(s.cols, s.rows); });
+    term.onTitleChange(function (t) { bridge.title(t); });
+    term.onBell(function () { bridge.bell(); });
+    window.vl = {
+      write: function (b64, sequence) {
+        var s = atob(b64), u = new Uint8Array(s.length);
+        for (var i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+        term.write(u, function () { bridge.written(sequence); });
+      },
+      note: function (text) { term.write('\r\n\x1b[2m' + text + '\x1b[0m\r\n'); },
+      fit: refit,
+      focus: function () { term.focus(); },
+      clear: function () { term.clear(); },
+      paste: function (text) { term.paste(text); },
+      // From the input bar: one line is typed as is; several lines go in as one paste (bracketed when the program
+      // asked for it) so Enter inside the text does not send early. Enter follows a moment later, in the same order.
+      submit: function (text, enter) {
+        if (text.indexOf('\n') >= 0) term.paste(text); else if (text) term.input(text, true);
+        if (enter) setTimeout(function () { term.input('\r', true); }, text.indexOf('\n') >= 0 ? 60 : 15);
+      },
+      selection: function () { return term.getSelection(); },
+      fontSize: function (px) { term.options.fontSize = px; refit(); },
+      cursorBlink: function (on) { term.options.cursorBlink = !!on; },
+      setTheme: function (t, chrome) { setChrome(chrome); term.options.theme = t; }
+    };
+    new ResizeObserver(refitSoon).observe(document.body);
+    refit();
+    if (document.fonts && document.fonts.ready) { document.fonts.ready.then(refit); }
+    bridge.ready(term.cols, term.rows);
+  });
+})();
+</script>
+</body>
+</html>
