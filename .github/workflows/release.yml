@@ -1,0 +1,57 @@
+name: Release
+
+# Push a tag vX.Y.Z (after merging the release PR into main) to build, test and publish the Windows installer.
+# The launcher updates itself from these releases (src/vibe_launcher/updates.py): keep the asset names
+# "Vibe-Launcher-Setup-<version>.exe" and "SHA256SUMS.txt" and put the CHANGELOG section in the release notes.
+# "Run workflow" by hand builds and uploads the installer as a workflow artifact only; it publishes nothing.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Tag, version and CHANGELOG agree
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: python scripts/release_notes.py check "${{ github.ref_name }}"
+      - name: Install
+        run: uv sync --locked --group dev --group build
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: uv run --no-sync pytest -q --basetemp="$env:RUNNER_TEMP\bt" -p no:cacheprovider -o faulthandler_timeout=90
+      - name: Inno Setup
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+      - name: Build program and installer
+        run: powershell -NoProfile -File packaging\build.ps1
+      - name: Release notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: python scripts/release_notes.py notes "${{ github.ref_name }}" "$env:RUNNER_TEMP\notes.md"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: dist-app/installer/*
+          retention-days: 14
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${{ github.ref_name }}" dist-app/installer/Vibe-Launcher-Setup-*.exe dist-app/installer/SHA256SUMS.txt
+          --title "Vibe Launcher ${{ github.ref_name }}" --notes-file "$env:RUNNER_TEMP\notes.md" --verify-tag

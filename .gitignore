@@ -1,0 +1,56 @@
+# Environments, caches, build output
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.local-test/
+.benchmark/
+.benchmark-*
+.pytest-*/
+*-dialog-preview.png
+.coverage
+htmlcov/
+
+# Local runtime data: never belongs in the repository (settings, jobs, helpers, UI prefs)
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+ui-state.json
+jobs/
+diagnostics/
+tool-versions/
+
+# Secrets and keys (defence in depth; the app itself never writes secrets into the project folder)
+.env
+.env.*
+*.pem
+*.key
+*.ppk
+id_rsa*
+id_ed25519*
+known_hosts
+*.token
+
+# Machine-specific files
+*.lnk
+*.log
+Thumbs.db
+.DS_Store
+
+# Editor / assistant local state
+.idea/
+.vscode/
+.claude/
+
+# Not for the repository: real-host validation notes, security findings, third-party brand marks, personal documents
+docs/private/
+src/vibe_launcher/assets/brand/
+/*.pdf
+packaging/*.ico
+dist-app/
+build-app/

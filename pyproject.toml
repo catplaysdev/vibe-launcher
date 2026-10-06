@@ -1,0 +1,24 @@
+[project]
+name = "vibe-launcher"
+version = "0.1.0"
+description = "Desktop launcher (Windows; Linux planned) for isolated Codex and Claude profiles over SSH"
+requires-python = ">=3.11"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+dependencies = ["PySide6>=6.8,<7"]
+
+[project.scripts]
+vibe-launcher = "vibe_launcher.ui:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "pytest-qt>=4.4,<5"]
+build = ["pyinstaller>=6.10,<7"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
