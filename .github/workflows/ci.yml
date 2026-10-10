@@ -2,8 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop, hotfix]     # feat/dev_* and fix_* branches never reach GitHub
   pull_request:
+    branches: [main]
 
 permissions:
   contents: read
