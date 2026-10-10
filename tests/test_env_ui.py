@@ -127,6 +127,32 @@ def test_failed_latest_session_and_missing_openssh_are_errors(store, monkeypatch
     assert state_for(store, env).tone == "ok"
 
 
+def test_a_newer_release_seen_on_one_machine_marks_the_others_behind(store):
+    local = store.get("environments", "local")
+    server = store.save("environments", {"name": "Server", "kind": "ssh", "ssh_target": "user@server"})
+    # The server was checked yesterday and was current then; the local check today saw newer releases.
+    write_report(store.path.parent, server["id"], report("codex", "0.158.0", "0.158.0", "current"),
+                 report("claude", "2.1.9", "2.1.4", "newer_than_registry"))
+    write_report(store.path.parent, "local", report("codex", "0.160.0", "0.160.0", "current"),
+                 report("claude", "2.1.5", "2.1.5", "current"))
+    tools = {t.tool: t for t in state_for(store, server).tools}
+    assert (tools["codex"].status, tools["codex"].latest) == ("update_available", "0.160.0")
+    assert tools["claude"].status == "newer_than_registry", "a server ahead of the newest release stays ahead"
+    chips = {c.key: c for c in state_for(store, server).chips}
+    assert chips["codex"].tone == "info" and "0.158.0 → 0.160.0" in chips["codex"].tip
+    assert {t.tool: t.status for t in state_for(store, local).tools} == {"codex": "current", "claude": "current"}
+
+
+def test_a_failed_or_unknown_tool_is_not_marked_by_other_machines(store):
+    server = store.save("environments", {"name": "Server", "kind": "ssh", "ssh_target": "user@server"})
+    write_report(store.path.parent, server["id"], report("codex", "0.158.0", "0.158.0", "update_failed", message="boom"),
+                 report("claude", "unknown", "unknown", "unknown"))
+    write_report(store.path.parent, "local", report("codex", "0.160.0", "0.160.0", "current"),
+                 report("claude", "2.1.5", "2.1.5", "current"))
+    tools = {t.tool: t for t in state_for(store, server).tools}
+    assert tools["codex"].status == "update_failed" and tools["claude"].status == "unknown"
+
+
 def test_tool_reports_become_semantic_chips(store):
     local = store.get("environments", "local")
     write_report(store.path.parent, "local",
