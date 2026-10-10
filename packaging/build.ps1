@@ -13,7 +13,7 @@ $env:PYTHONUTF8 = '1'
 
 & $python packaging\make_icon.py
 if ($LASTEXITCODE) { throw 'Icon build failed.' }
-& $python -m PyInstaller --noconfirm --distpath dist-app --workpath build-app packaging\vibe-launcher.spec
+& $python -m PyInstaller --clean --noconfirm --distpath dist-app --workpath build-app packaging\vibe-launcher.spec
 if ($LASTEXITCODE) { throw 'PyInstaller failed.' }
 
 # What a packaged build can silently lose (data files, trimmed Qt modules, helper command lines) shows up here.

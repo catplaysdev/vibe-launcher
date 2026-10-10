@@ -1,3 +1,9 @@
+<!-- 只從 develop（新功能測試版）或 hotfix（已發布版本的修正）開 PR 到 main；feat/dev_*、fix_* 分支不推上 GitHub。 -->
+
+## 來源分支
+- [ ] develop
+- [ ] hotfix（合併後把 main 併回 develop，並刪除 hotfix）
+
 ## 改了什麼
 
 ## 為什麼

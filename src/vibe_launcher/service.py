@@ -30,10 +30,13 @@ def data_root() -> Path:
     return Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "VibeLauncher"
 
 
-# Conversation copying is only reached from launches and the import actions; the GitHub and Harness helpers stay under the
-# SSH command length limit without it.
+# Conversation copying and extension sharing are only reached from launches and the import actions; the GitHub and
+# Harness helpers stay under the SSH command length limit without them.
 HISTORY_ONLY = {"_copy_transcripts", "sync_history", "_same_project_path", "_codex_rollout_cwd", "claude_project_folder",
-                "sync_project_history"}
+                "sync_project_history", "sync_user_data", "native_codex_state",
+                "sync_extensions", "_shareable_files", "shared_settings", "shared_codex_config", "toml_dumps", "_toml_key",
+                "_toml_value", "_write_private", "_merge_shared_settings", "_retain_missing", "manual_import",
+                "user_plugin_dirs", "read_user_text", "resumable"}
 
 # GitHub helpers every feature needs: work launched for a bound project runs with that account's identity.
 SHARED_GITHUB = {"github_env", "github_session_env", "github_author", "github_helper"}
@@ -136,7 +139,7 @@ class LauncherService:
               login_method: str = "device", tool: str | None = None, snap_channel: str = "",
               mode: str = "agent", spawn: Callable[[list[str], dict], Any] | None = None,
               session_ids: list[str] | None = None, operation: dict | None = None,
-              github_account_id: str | None = None, terminal_profile: str = "") -> str | None:
+              github_account_id: str | None = None, terminal_profile: str = "", resume: bool = False) -> str | None:
         """Create a job and run it. ``spawn(args, context)`` runs it in a terminal of the caller's choosing (the app's
         built-in terminal); without it the job opens in an external console window. Returns the new session id."""
         if action not in {"launch", "login", "doctor", "refresh", "attach", "stop", "ssh-settings", "check-tools", "update-tool", "quota", "browse", "github", "harness", "import-settings", "import-history"}:
@@ -212,6 +215,8 @@ class LauncherService:
                 request["terminal_profile"] = selected
         elif terminal_profile:
             raise ValueError("Terminal profile requires terminal mode")
+        if resume and action == "launch" and mode != "shell":
+            request["resume"] = True        # continue the folder's last conversation (restoring, not a fresh start)
         if action in {"launch", "login", "quota"} and not account_id and mode != "shell":
             raise ValueError("Select an account")
         if action == "launch" and not preset_id:

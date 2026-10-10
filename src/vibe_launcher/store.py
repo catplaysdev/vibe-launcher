@@ -3,7 +3,6 @@ import json
 import ipaddress
 import re
 import sqlite3
-import time
 import unicodedata
 import uuid
 from contextlib import contextmanager
@@ -52,7 +51,7 @@ def normalize_tags(value: Any) -> list[str]:
 _FINISHED = {"ended", "failed"}
 
 _FIELDS: dict[str, set[str]] = {
-    "accounts": {"id", "name", "tool", "auth", "model", "base_url", "allow_insecure_loopback", "credential_revision", "share_extensions", "import_history", "share_project_history", "environment_id", "manual_import_notice"},
+    "accounts": {"id", "name", "tool", "auth", "model", "base_url", "allow_insecure_loopback", "credential_revision", "share_project_history", "environment_id"},
     "github_accounts": {"id", "name", "environment_id", "login", "status", "checked_at", "credential_storage", "user_id", "author_name", "author_email"},
     "web_services": {"id", "tool", "account_id", "github_account_id", "environment_id", "status", "port", "local_port", "updated_at", "service_key", "experimental"},
     "environments": {"id", "name", "kind", "ssh_target", "ssh_auth_mode", "remember_seconds", "credential_epoch"},
@@ -65,13 +64,10 @@ _FIELDS: dict[str, set[str]] = {
     "auth_states": {"id", "status", "checked_at"},
 }
 _IMPORT_FIELDS = {
-    kind: fields - {"credential_revision", "credential_epoch", "manual_import_notice", "login", "status", "checked_at", "credential_storage", "user_id", "github_branch", "github_access"}
+    kind: fields - {"credential_revision", "credential_epoch", "login", "status", "checked_at", "credential_storage", "user_id", "github_branch", "github_access"}
     for kind, fields in _FIELDS.items()
 }
 
-
-# PRAGMA user_version this build writes. A database from a newer build (higher value) is opened read-only.
-SCHEMA_VERSION = 2
 
 
 class Store:
@@ -79,10 +75,7 @@ class Store:
 
     def __init__(self, path: Path):
         self.path = Path(path)
-        self.readonly = False
         runtime.private_dir(self.path.parent)
-        if self._inspect_existing():
-            return
         with self._connect() as connection:
             connection.executescript(
                 """
@@ -117,7 +110,6 @@ class Store:
                 );
                 """
             )
-            self._allow_projects_without_account(connection)
             connection.execute(
                 "INSERT OR IGNORE INTO environments(id, payload) VALUES (?, ?)",
                 ("local", self._dump({
@@ -126,30 +118,7 @@ class Store:
                     "credential_epoch": uuid.uuid4().hex,
                 })),
             )
-            self._migrate_security_payloads(connection)
-            self._migrate_manual_import(connection)
         runtime.protect_path(self.path)
-
-    def _inspect_existing(self) -> bool:
-        """Back up an existing database before a migration rewrites it; return True when it is too new to touch."""
-        try:
-            existed = self.path.stat().st_size > 0
-        except FileNotFoundError:
-            existed = False
-        if not existed:
-            return False
-        with self._connect() as connection:
-            version = connection.execute("PRAGMA user_version").fetchone()[0]
-            tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            rebuild = any(row[1] == "account_id" and row[3]
-                          for table in ("presets", "sessions") if table in tables
-                          for row in connection.execute(f"PRAGMA table_info({table})"))
-        if version > SCHEMA_VERSION:
-            self.readonly = True
-            return True
-        if tables and (version < SCHEMA_VERSION or rebuild):
-            self.backup(self.path.parent / "backups" / f"db-before-v{SCHEMA_VERSION}-{time.strftime('%Y%m%d-%H%M%S')}.sqlite3")
-        return False
 
     def backup(self, target: Path) -> Path:
         """Consistent copy of the database (SQLite online backup) to a private file that must not exist yet."""
@@ -166,94 +135,6 @@ class Store:
             destination.close()
         runtime.protect_path(target)
         return target
-
-    def _writable(self) -> None:
-        if self.readonly:
-            raise ValueError(tr("The database was created by a newer version of Vibe Launcher; this version can only read it."))
-
-    @staticmethod
-    def _migrate_manual_import(connection: sqlite3.Connection) -> None:
-        if connection.execute("PRAGMA user_version").fetchone()[0] >= 2:
-            return
-        for row in connection.execute("SELECT id,payload FROM accounts").fetchall():
-            item = json.loads(row["payload"])
-            item["manual_import_notice"] = bool(item.get("share_extensions") or item.get("import_history"))
-            item.update(share_extensions=False, import_history=False)
-            connection.execute("UPDATE accounts SET payload=? WHERE id=?", (Store._dump(item), row["id"]))
-        connection.execute("PRAGMA user_version=2")
-
-    @staticmethod
-    def _allow_projects_without_account(connection: sqlite3.Connection) -> None:
-        """Projects no longer carry an account (it is chosen when one is opened), so account_id must accept NULL.
-
-        SQLite cannot drop NOT NULL in place; rebuild the two tables the documented way (foreign keys off while we swap).
-        """
-        def needs_rebuild(table: str) -> bool:
-            return any(row[1] == "account_id" and row[3] for row in connection.execute(f"PRAGMA table_info({table})"))
-
-        if not (needs_rebuild("presets") or needs_rebuild("sessions")):
-            return
-        connection.execute("PRAGMA foreign_keys = OFF")
-        if needs_rebuild("presets"):
-            connection.executescript("""
-                CREATE TABLE presets_new (
-                    id TEXT PRIMARY KEY, payload TEXT NOT NULL,
-                    account_id TEXT REFERENCES accounts(id) ON DELETE RESTRICT,
-                    environment_id TEXT NOT NULL REFERENCES environments(id) ON DELETE RESTRICT
-                );
-                INSERT INTO presets_new SELECT id, payload, account_id, environment_id FROM presets;
-                DROP TABLE presets;
-                ALTER TABLE presets_new RENAME TO presets;
-            """)
-        if needs_rebuild("sessions"):
-            connection.executescript("""
-                CREATE TABLE sessions_new (
-                    id TEXT PRIMARY KEY, payload TEXT NOT NULL,
-                    preset_id TEXT REFERENCES presets(id) ON DELETE RESTRICT,
-                    account_id TEXT REFERENCES accounts(id) ON DELETE RESTRICT,
-                    environment_id TEXT NOT NULL REFERENCES environments(id) ON DELETE RESTRICT
-                );
-                INSERT INTO sessions_new SELECT id, payload, preset_id, account_id, environment_id FROM sessions;
-                DROP TABLE sessions;
-                ALTER TABLE sessions_new RENAME TO sessions;
-            """)
-        connection.execute("PRAGMA foreign_keys = ON")
-
-    @staticmethod
-    def _migrate_security_payloads(connection: sqlite3.Connection) -> None:
-        signed_in: dict[str, set[str]] = {}
-        for state in connection.execute("SELECT id, payload FROM auth_states").fetchall():
-            account_id, _, environment_id = state["id"].partition(":")
-            try:
-                status = json.loads(state["payload"]).get("status")
-            except ValueError:
-                continue
-            if status == "authenticated":
-                signed_in.setdefault(account_id, set()).add(environment_id)
-        for table, rows in (("accounts", connection.execute("SELECT id, payload FROM accounts")),
-                            ("environments", connection.execute("SELECT id, payload FROM environments"))):
-            for row in rows.fetchall():
-                item = json.loads(row["payload"])
-                if table == "accounts":
-                    item.setdefault("allow_insecure_loopback", False)
-                    item.setdefault("share_extensions", True)
-                    # A subscription login lives where it was made. Bind to it when that is unambiguous; an account
-                    # that is signed in on several machines stays unbound ("") until the user picks one.
-                    places = signed_in.get(item.get("id", ""), set())
-                    item.setdefault("environment_id", next(iter(places)) if item.get("auth") == "subscription" and len(places) == 1 else "")
-                    item.setdefault("credential_revision", uuid.uuid4().hex)
-                else:
-                    auth_mode = item.setdefault("ssh_auth_mode", "interactive")
-                    if auth_mode not in {"interactive", "password", "key"}:
-                        auth_mode = "interactive"
-                        item["ssh_auth_mode"] = auth_mode
-                    if type(item.get("remember_seconds", 0)) is not int or item.get("remember_seconds", 0) not in {0, 900, 3600, 28800, -1}:
-                        item["remember_seconds"] = 0
-                    if auth_mode != "password" or item.get("kind") != "ssh":
-                        item["remember_seconds"] = 0
-                    item.setdefault("remember_seconds", 0)
-                    item.setdefault("credential_epoch", uuid.uuid4().hex)
-                connection.execute(f"UPDATE {table} SET payload=? WHERE id=?", (Store._dump(item), row["id"]))
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -311,13 +192,6 @@ class Store:
             result.setdefault("model", "")
             result.setdefault("base_url", "")
             result.setdefault("allow_insecure_loopback", False)
-            result.setdefault("share_extensions", False)
-            result.setdefault("manual_import_notice", False)
-            if not isinstance(result["share_extensions"], bool):
-                raise ValueError("share_extensions must be a boolean")
-            result.setdefault("import_history", False)
-            if not isinstance(result["import_history"], bool):
-                raise ValueError("import_history must be a boolean")
             result.setdefault("share_project_history", False)
             if not isinstance(result["share_project_history"], bool):
                 raise ValueError("share_project_history must be a boolean")
@@ -503,7 +377,7 @@ class Store:
         tables = [self._table(kind) for kind in kinds]
         with self._connect() as connection:
             rows = {table: connection.execute(f"SELECT payload FROM {table} ORDER BY id").fetchall() for table in tables}
-        return {table: [json.loads(row["payload"]) for row in rows[table]] for table in tables}
+        return {table: [self._known(table, json.loads(row["payload"])) for row in rows[table]] for table in tables}
 
     def get(self, kind: str, id: str) -> dict[str, Any]:
         table = self._table(kind)
@@ -511,10 +385,14 @@ class Store:
             row = connection.execute(f"SELECT payload FROM {table} WHERE id = ?", (id,)).fetchone()
         if row is None:
             raise KeyError(id)
-        return json.loads(row["payload"])
+        return self._known(table, json.loads(row["payload"]))
+
+    @staticmethod
+    def _known(table: str, item: dict[str, Any]) -> dict[str, Any]:
+        """Only the fields this build uses: a field dropped during development simply disappears on the next save."""
+        return {key: value for key, value in item.items() if key in _FIELDS[table]}
 
     def save(self, kind: str, item: dict[str, Any]) -> dict[str, Any]:
-        self._writable()
         table = self._table(kind)
         record = self._validate(kind, item)
         if kind == "environments" and record["id"] == "local" and (
@@ -574,7 +452,6 @@ class Store:
         connection.executemany("DELETE FROM auth_states WHERE id=?", ((id,) for id in ids))
 
     def revoke_ssh(self, id: str) -> dict[str, Any]:
-        self._writable()
         with self._connect() as connection:
             row = connection.execute("SELECT payload FROM environments WHERE id=?", (id,)).fetchone()
             if row is None:
@@ -621,7 +498,6 @@ class Store:
                 raise ValueError("Record identity cannot be changed; create a new account or environment")
 
     def delete(self, kind: str, id: str) -> None:
-        self._writable()
         table = self._table(kind)
         if kind == "environments" and id == "local":
             raise ValueError("The built-in local environment cannot be deleted")
@@ -711,7 +587,6 @@ class Store:
         }
         for account in output["accounts"]:
             account.pop("credential_revision", None)
-            account.pop("manual_import_notice", None)
         for account in output["github_accounts"]:
             for key in ("login", "status", "checked_at", "credential_storage", "user_id"):
                 account.pop(key, None)
@@ -727,7 +602,6 @@ class Store:
         Path(path).write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     def import_config(self, path: Path) -> None:
-        self._writable()
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
@@ -736,9 +610,9 @@ class Store:
             not isinstance(data, dict)
             or not {"version", "accounts", "environments", "presets"} <= set(data) <= {"version", "accounts", "environments", "presets", "workspaces", "github_accounts"}
             or type(data.get("version")) is not int
-            or data.get("version") not in {1, 2}
+            or data.get("version") != 2
         ):
-            raise ValueError("Configuration must have version 1 and only accounts, environments, presets, and workspaces")
+            raise ValueError("Configuration must have version 2 and only accounts, environments, presets, workspaces and GitHub accounts")
         records: dict[str, list[dict[str, Any]]] = {}
         for kind in ("accounts", "environments", "presets", "github_accounts"):
             entries = data.get(kind, [])

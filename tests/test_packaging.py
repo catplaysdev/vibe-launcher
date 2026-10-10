@@ -72,7 +72,7 @@ def release(version, *, assets=True, draft=False, prerelease=False, body=None):
     prefix = f"https://github.com/{updates.RELEASE_REPO}/releases/download/v{version}/"
     names = [f"Vibe-Launcher-Setup-{version}.exe", updates.SUMS_NAME] if assets else []
     return {"tag_name": f"v{version}", "draft": draft, "prerelease": prerelease, "published_at": "2026-10-07T01:02:03Z",
-            "body": body if body is not None else f"- Faster terminals.\n### 設定變更\n- 變更: terminal_font_size（預設改為 13）\n",
+            "body": body if body is not None else "- Faster terminals.\n",
             "assets": [{"name": n, "browser_download_url": prefix + n} for n in names]}
 
 
@@ -87,7 +87,6 @@ def test_only_installable_newer_published_releases_are_offered(monkeypatch):
     found = updates._latest_releases(updates.RELEASE_REPO, (0, 1, 0))
     assert [r["version"] for r in found] == ["0.3.0", "0.2.0"]
     assert found[0]["notes"] == ["Faster terminals."]
-    assert found[0]["settings_changes"] == [{"kind": "changed", "key": "terminal_font_size", "detail": "預設改為 13"}]
 
 
 def test_a_release_with_files_from_another_place_is_ignored(monkeypatch):
@@ -167,7 +166,7 @@ def test_apply_release_backs_up_downloads_verifies_then_starts_the_installer(fro
     (old / "leftover.exe").write_bytes(b"old")
     assert updates.apply_release(data_root) == 0
     output = capsys.readouterr().out
-    assert "terminal_font_size" in output and "已備份" in output
+    assert "已備份" in output
     (target,) = started
     assert target[0].endswith("Vibe-Launcher-Setup-0.2.0.exe") and "/CLOSEAPPLICATIONS" in target and "/SILENT" in target and "/RESTARTAPPLICATIONS" not in target
     assert [p.name for p in old.iterdir()] == ["Vibe-Launcher-Setup-0.2.0.exe"], "earlier downloads are removed"
@@ -207,10 +206,6 @@ CHANGELOG = """# Changelog
 
 - Faster terminals.
 
-### 設定變更
-
-- 變更: terminal_font_size（預設改為 13）
-
 ## [0.1.0] - 2026-09-01
 
 - First.
@@ -224,7 +219,6 @@ def test_the_release_body_is_the_versions_changelog_section_and_the_updater_read
     assert notes.section(CHANGELOG, "9.9.9") is None
     parsed = updates.parse_changelog("## [0.2.0] - 2026-10-07\n" + body)["0.2.0"]
     assert parsed["notes"] == ["Faster terminals."]
-    assert parsed["settings_changes"] == [{"kind": "changed", "key": "terminal_font_size", "detail": "預設改為 13"}]
     assert notes.project_version('[project]\nname = "x"\nversion = "1.2.3"\n') == "1.2.3"
     assert notes.main(["release_notes.py", "check", "not-a-tag"]) == 2
 

@@ -1,5 +1,7 @@
 """Choose a project's icon: a built-in glyph or the user's own picture / SVG, with a colour for glyphs and SVGs.
 
+Workspaces use the same dialog with their own title, hue and default glyph, plus a name field.
+
 Nothing is written until Save: a picked picture is only checked and previewed; Save copies it into the launcher's data
 folder (``project_icons.store_picture``). Cancel leaves the old icon and files as they were.
 """
@@ -10,7 +12,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QPainter
-from PySide6.QtWidgets import QButtonGroup, QColorDialog, QDialog, QFileDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (QButtonGroup, QColorDialog, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+                               QVBoxLayout, QWidget)
 
 from . import project_icons
 from .appearance import Swatch
@@ -27,29 +30,45 @@ class _Preview(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802
         p = QPainter(self)
-        project_icons.draw(p, QRectF(self.rect()), entry=self.dialog.entry, preview=self.dialog.pending,
-                           dpr=max(2.0, self.devicePixelRatioF()), radius=R.lg)
+        project_icons.draw(p, QRectF(self.rect()), entry=self.dialog.entry or {}, preview=self.dialog.pending,
+                           dpr=max(2.0, self.devicePixelRatioF()), radius=R.lg, hue=self.dialog.hue, glyph=self.dialog.glyph)
         p.end()
 
 
 class ProjectIconDialog(QDialog):
-    def __init__(self, parent: QWidget, project_name: str, entry: dict | None):
+    def __init__(self, parent: QWidget, project_name: str, entry: dict | None, *, title: str = "", hue: str = "",
+                 glyph: str = "folder", name_label: str = "", taken: frozenset[str] | set[str] = frozenset()):
+        """``name_label`` turns the name into an editable field; Save then refuses an empty name or one in ``taken``."""
         super().__init__(parent)
-        self.setWindowTitle(tr("Project icon"))
+        title = title or tr("Project icon")
+        self.setWindowTitle(title)
         self.setModal(True)
+        self.hue, self.glyph = hue or section_hue("projects"), glyph
+        self.taken = {name.casefold() for name in taken}
         self.entry: dict | None = dict(entry) if entry else None
         self.pending: tuple[bytes, str] | None = None      # a picked picture, stored on Save
         root = QVBoxLayout(self)
         root.setContentsMargins(S.xl, S.xl, S.xl, S.lg)
         root.setSpacing(S.md)
-        root.addWidget(label(tr("Project icon"), "dialogTitle"))
+        root.addWidget(label(title, "dialogTitle"))
         head = QHBoxLayout()
         head.setSpacing(S.lg)
         self.preview = _Preview(self)
         head.addWidget(self.preview)
-        name = label(project_name, "subsection", wrap=True)
-        name.setTextFormat(Qt.TextFormat.PlainText)
-        head.addWidget(name, 1)
+        self.name_field: QLineEdit | None = None
+        if name_label:
+            column = QVBoxLayout()
+            column.setSpacing(S.xs)
+            column.addWidget(label(name_label, "subsection"))
+            self.name_field = QLineEdit(project_name)
+            self.name_field.setMaxLength(64)
+            self.name_field.setAccessibleName(name_label)
+            column.addWidget(self.name_field)
+            head.addLayout(column, 1)
+        else:
+            name = label(project_name, "subsection", wrap=True)
+            name.setTextFormat(Qt.TextFormat.PlainText)
+            head.addWidget(name, 1)
         root.addLayout(head)
 
         root.addWidget(label(tr("Built-in icons"), "subsection"))
@@ -81,7 +100,7 @@ class ProjectIconDialog(QDialog):
         colours = FlowLayout(colours_host, S.xs, S.xs)
         colours.setContentsMargins(0, 0, 0, 0)
         self.colour_group = QButtonGroup(self)
-        self.default_swatch = Swatch(resolve(section_hue("projects")), tr("Theme colour"))
+        self.default_swatch = Swatch(resolve(self.hue), tr("Theme colour"))
         self.default_swatch.clicked.connect(lambda: self.choose_colour(""))
         self.colour_group.addButton(self.default_swatch)
         colours.addWidget(self.default_swatch)
@@ -135,7 +154,7 @@ class ProjectIconDialog(QDialog):
         if self._is_picture():
             return
         if self.entry is None:
-            self.entry = {"kind": "glyph", "name": "folder", "color": ""}
+            self.entry = {"kind": "glyph", "name": self.glyph, "color": ""}
         self.entry["color"] = colour.upper() if colour else ""
         self._sync()
 
@@ -185,7 +204,7 @@ class ProjectIconDialog(QDialog):
             swatch.setEnabled(not picture)
         self.custom_button.setEnabled(not picture)
         self.colour_note.setVisible(picture)
-        self.default_swatch.color = resolve(section_hue("projects"))
+        self.default_swatch.color = resolve(self.hue)
         self.colour_group.setExclusive(False)
         for swatch in (self.default_swatch, self.custom_swatch, *self.swatches.values()):
             swatch.setChecked(False)
@@ -202,6 +221,21 @@ class ProjectIconDialog(QDialog):
             widget.update()
 
     # -- result --------------------------------------------------------------------------------------
+    def accept(self) -> None:
+        if self.name_field is not None:
+            name = self.result_name()
+            if not name:
+                self._say(tr('ui.067e3e6ad298'))
+                return
+            if name.casefold() in self.taken:
+                self._say(tr("A workspace with this name already exists. Choose another name."))
+                return
+        super().accept()
+
+    def result_name(self) -> str:
+        """The edited name (only with ``name_label``), without surrounding spaces or line breaks."""
+        return " ".join((self.name_field.text() if self.name_field is not None else "").split())
+
     def result_entry(self, root: Path) -> dict | None:
         """The entry to keep (None = default folder). Stores a newly picked picture; call once, after Save."""
         if self.entry is None:

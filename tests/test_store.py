@@ -87,7 +87,7 @@ def test_export_import_only_nonsecret_config_and_is_atomic(tmp_path):
     assert target.list("sessions") == []
 
     before = target.list("accounts")
-    exported.write_text(json.dumps({"version": 1, "accounts": [{"id": "x", "name": "x", "token": "secret"}], "environments": [], "presets": []}), encoding="utf-8")
+    exported.write_text(json.dumps({"version": 2, "accounts": [{"id": "x", "name": "x", "token": "secret"}], "environments": [], "presets": []}), encoding="utf-8")
     with pytest.raises(ValueError):
         target.import_config(exported)
     assert target.list("accounts") == before
@@ -97,7 +97,7 @@ def test_rejects_import_with_broken_references(tmp_path):
     store = Store(tmp_path / "launcher.db")
     config = tmp_path / "config.json"
     config.write_text(
-        json.dumps({"version": 1, "accounts": [], "environments": [], "presets": [{"id": "p", "name": "p", "account_id": "missing", "environment_id": "local", "path": "C:/p", "favorite": False}]}),
+        json.dumps({"version": 2, "accounts": [], "environments": [], "presets": [{"id": "p", "name": "p", "account_id": "missing", "environment_id": "local", "path": "C:/p", "favorite": False}]}),
         encoding="utf-8",
     )
     with pytest.raises(ValueError):
@@ -220,17 +220,3 @@ def test_import_drops_internal_revisions_and_disables_password_memory(tmp_path):
     exported.write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(ValueError):
         target.import_config(exported)
-
-
-def test_legacy_ssh_remember_setting_is_cleared_on_migration(tmp_path):
-    import sqlite3
-
-    path = tmp_path / "legacy.db"
-    connection = sqlite3.connect(path)
-    connection.executescript("CREATE TABLE accounts (id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE environments (id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE presets (id TEXT PRIMARY KEY, payload TEXT NOT NULL, account_id TEXT NOT NULL REFERENCES accounts(id), environment_id TEXT NOT NULL REFERENCES environments(id)); CREATE TABLE sessions (id TEXT PRIMARY KEY, payload TEXT NOT NULL, preset_id TEXT REFERENCES presets(id), account_id TEXT NOT NULL REFERENCES accounts(id), environment_id TEXT NOT NULL REFERENCES environments(id)); CREATE TABLE auth_states (id TEXT PRIMARY KEY, payload TEXT NOT NULL);")
-    connection.execute("INSERT INTO environments VALUES (?, ?)", ("host", json.dumps({"id": "host", "name": "SSH", "kind": "ssh", "ssh_target": "host", "remember_seconds": 3600})))
-    connection.commit()
-    connection.close()
-    migrated = Store(path).get("environments", "host")
-    assert migrated["ssh_auth_mode"] == "interactive"
-    assert migrated["remember_seconds"] == 0

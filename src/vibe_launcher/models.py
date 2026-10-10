@@ -9,7 +9,6 @@ class AccountProfile(TypedDict):
     model: NotRequired[str]
     base_url: NotRequired[str]
     allow_insecure_loopback: NotRequired[bool]
-    share_extensions: NotRequired[bool]
     credential_revision: NotRequired[str]
 
 

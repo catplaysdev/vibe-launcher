@@ -213,6 +213,8 @@ def validate_request(request: dict) -> None:
         raise ValueError("Unsupported Snap channel")
     if "persistent" in request and type(request["persistent"]) is not bool:
         raise ValueError("Invalid persistent flag")
+    if "resume" in request and (type(request["resume"]) is not bool or request.get("action") not in {"launch", "worker"}):
+        raise ValueError("Invalid resume flag")
     if request.get("mode", "agent") not in {"agent", "shell"}:
         raise ValueError("Unsupported session mode")
     if "terminal_profile" in request:
@@ -412,8 +414,9 @@ def trusted_executable(name: str) -> str:
     raise RuntimeError("Required native executable is unavailable: " + name)
 
 
-def cli_command(account: dict, action: str, root: Path, method: str = "device") -> list[str]:
-    command = build_cli(account, action, root, method)
+def cli_command(account: dict, action: str, root: Path, method: str = "device", project: Path | None = None,
+                resume: bool = False) -> list[str]:
+    command = build_cli(account, action, root, method, project, resume)
     command[0] = trusted_executable(command[0])
     if account["tool"] == "codex" and action == "launch" and "--no-daemon" in command:
         result = subprocess.run([command[0], "--help"], env=isolated_env(account, root),
@@ -425,7 +428,8 @@ def cli_command(account: dict, action: str, root: Path, method: str = "device") 
     return command
 
 
-def build_cli(account: dict, action: str, root: Path, method: str = "device") -> list[str]:
+def build_cli(account: dict, action: str, root: Path, method: str = "device", project: Path | None = None,
+              resume: bool = False) -> list[str]:
     tool = account["tool"]
     if tool not in {"codex", "claude"}:
         raise ValueError("Unknown terminal tool")
@@ -439,10 +443,15 @@ def build_cli(account: dict, action: str, root: Path, method: str = "device") ->
         command = [tool]
         if account.get("model"):
             command += ["--model", account["model"]]
-        for plugin in imported_plugin_dirs(account, root):
+        for plugin in user_plugin_dirs(account, project=project):
             command += ["--plugin-dir", plugin]
+        if resume and resumable(account, root, project):
+            command.append("--continue")       # pick up the last conversation in this folder instead of a new one
         return command
     command = [tool, "--no-daemon"]
+    native_state = native_codex_state()
+    if native_state is not None:
+        command += ["-c", "sqlite_home=" + json.dumps(str(native_state))]
     if account.get("model"):
         command += ["--model", account["model"]]
     if account["auth"] == "api":
@@ -458,7 +467,29 @@ def build_cli(account: dict, action: str, root: Path, method: str = "device") ->
         command += ["-c", "model_providers.vibe.requires_openai_auth=false"]
     else:
         command += ["-c", 'model_provider="openai"', "-c", 'forced_login_method="chatgpt"']
+    if resume and resumable(account, root, project):
+        command += ["resume", "--last"]        # the most recent session of this folder (Codex filters by cwd)
     return command
+
+
+def resumable(account: dict, root: Path, project: Path | None) -> bool:
+    """Is there an earlier conversation of this account in ``project`` to continue? (Claude refuses --continue without one.)"""
+    if project is None:
+        return False
+    try:
+        profile = profile_dir(root, account)
+        if account["tool"] == "claude":
+            folder = profile / "projects" / claude_project_folder(str(project))
+            return folder.is_dir() and any(path.suffix == ".jsonl" for path in folder.iterdir())
+        native = native_codex_state()
+        rollouts = []
+        for base in [profile / "sessions"] + ([native / "sessions"] if native is not None else []):
+            if base.is_dir():
+                rollouts += base.glob("*/*/*/rollout-*.jsonl")
+        newest = sorted(rollouts, key=lambda path: path.name, reverse=True)[:200]
+        return any(_same_project_path(_codex_rollout_cwd(path), str(project)) for path in newest)
+    except (OSError, ValueError):
+        return False
 
 
 def check_settings(account: dict, root: Path, project: Path) -> None:
@@ -525,7 +556,7 @@ def api_key(account: dict, root: Path, replace: bool = False) -> str:
     validate_endpoint(account)
     path = profile_dir(root, account) / "api-key"
     binding = hashlib.sha256(json.dumps([account["tool"], account.get("base_url", ""),
-                                        account.get("credential_revision", "legacy")]).encode()).hexdigest()
+                                        account.get("credential_revision", "")]).encode()).hexdigest()
     current = None
     if not replace:
         raw = windows_secret(account) if WINDOWS else (read_private(path) if path.exists() else None)
@@ -534,7 +565,7 @@ def api_key(account: dict, root: Path, replace: bool = False) -> str:
             if saved.get("binding") == binding:
                 current = saved.get("key")
         except (ValueError, AttributeError):
-            pass  # Legacy unbound credentials require explicit re-entry.
+            pass  # unreadable: ask for the key again
     if current:
         return current
     if not sys.stdin.isatty():
@@ -559,7 +590,7 @@ def emit(request: dict, event: dict) -> None:
 # We copy (never link: launcher data may not contain links) only the *extension* parts, never credentials.
 # This file is also run on SSH hosts as a single script, so everything it needs lives here.
 SHARE_DIRS = {"claude": ("skills", "agents", "commands", "hooks", "output-styles"),
-              "codex": ("skills", "prompts", "agents", "rules")}
+              "codex": ("skills", "prompts", "agents", "rules", "plugins")}
 SHARE_FILES = {"claude": (), "codex": ("hooks.json",)}      # plus every top-level *.md (CLAUDE.md, AGENTS.md, files they @import)
 SHARE_SETTINGS = ("model", "hooks", "permissions", "statusLine", "outputStyle", "theme", "effortLevel", "attribution")
 SHARE_TOML_KEYS = ("model", "approval_policy", "sandbox_mode", "model_reasoning_effort", "personality", "notify",
@@ -573,12 +604,23 @@ SECRETISH = re.compile(r"(key|token|secret|passw|credential|auth)", re.I)
 NEVER_COPY = {".credentials.json", "auth.json", ".env", "credentials.json", "id_rsa", "id_ed25519"}
 
 
-def sharing_enabled(account: dict) -> bool:
-    return account.get("share_extensions", True) is True
-
-
 def user_config_dir(tool: str, home: Path | None = None) -> Path:
     return (home or Path.home()) / (".claude" if tool == "claude" else ".codex")
+
+
+def native_codex_state(home: Path | None = None) -> Path | None:
+    """Use Codex's existing index, including paginated conversations, without sharing auth.json."""
+    source = user_config_dir("codex", home)
+    try:
+        assert_private_path(source)
+        if source.is_dir():
+            for path in source.glob("state_*.sqlite"):
+                assert_private_path(path)
+                if path.is_file():
+                    return source
+    except (OSError, ValueError):
+        pass                                   # a linked or unreadable ~/.codex: keep the profile's own index
+    return None
 
 
 def _plain(path: Path) -> bool:
@@ -589,7 +631,7 @@ def _plain(path: Path) -> bool:
     return not (stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400)
 
 
-def _shareable_files(source: Path, tool: str) -> list[Path]:
+def _shareable_files(source: Path, tool: str, *, follow_skill_links: bool = False) -> list[Path]:
     """Relative paths of the files to copy: whitelisted folders and top-level notes, without links or secrets."""
     found: list[Path] = []
     if not source.is_dir():
@@ -601,14 +643,22 @@ def _shareable_files(source: Path, tool: str) -> list[Path]:
             found.append(Path(entry.name))
     for name in SHARE_DIRS[tool]:
         base = source / name
-        if not base.is_dir() or not _plain(base):
+        linked_skills = follow_skill_links and name == "skills"
+        if not base.is_dir() or (not linked_skills and not _plain(base)):
             continue
-        for current, dirs, files in os.walk(base, followlinks=False):
+        visited = set()
+        for current, dirs, files in os.walk(base, followlinks=linked_skills):
             here = Path(current)
-            dirs[:] = sorted(d for d in dirs if _plain(here / d) and d not in {".git", "node_modules", "__pycache__", ".system"})
+            resolved = here.resolve()
+            if resolved in visited:
+                dirs[:] = []
+                continue
+            visited.add(resolved)
+            dirs[:] = sorted(d for d in dirs if (linked_skills or _plain(here / d))
+                             and d not in {".git", "node_modules", "__pycache__", ".system"})
             for file in sorted(files):
                 path = here / file
-                if file.lower() in NEVER_COPY or not _plain(path):
+                if file.lower() in NEVER_COPY or (not linked_skills and not _plain(path)):
                     continue
                 try:
                     if path.stat().st_size > SHARE_MAX_FILE:
@@ -617,7 +667,7 @@ def _shareable_files(source: Path, tool: str) -> list[Path]:
                     continue
                 found.append(path.relative_to(source))
                 if len(found) > SHARE_MAX_FILES:
-                    raise ValueError("Too many extension files to share; trim " + str(base))
+                    return found               # the caller decides: an import refuses, a launch copies what fits
     return found
 
 
@@ -675,7 +725,8 @@ def shared_codex_config(text: str) -> str:
 
 
 def _write_private(path: Path, data: bytes) -> None:
-    private_dir(path.parent)
+    if not path.parent.is_dir():
+        private_dir(path.parent)   # new folders get the private ACL; existing ones are already protected
     assert_private_path(path)
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
     try:
@@ -687,9 +738,14 @@ def _write_private(path: Path, data: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _merge_shared_settings(current: dict, shared: dict, previous: dict) -> dict:
+def _merge_shared_settings(current: dict, shared: dict, previous: dict, follow_source: bool = False) -> dict:
     """Only update values still equal to our last copy; keep personal edits and deletions."""
     managed = dict(previous)
+    if follow_source:
+        for key in previous.keys() - shared.keys():
+            if current.get(key) == previous[key]:
+                current.pop(key, None)
+                managed.pop(key, None)
     for key in shared:
         if key in previous:
             if key not in current or current[key] != previous[key]:
@@ -710,18 +766,23 @@ def _retain_missing(current: dict, incoming: dict) -> dict:
     return result
 
 
-def sync_extensions(account: dict, root: Path, home: Path | None = None) -> dict:
-    """Explicitly copy safe extensions; preserve personal edits and content absent from the source."""
+def sync_extensions(account: dict, root: Path, home: Path | None = None, *, follow_source: bool = False) -> dict:
+    """Explicitly copy safe extensions; preserve personal edits and content absent from the source.
+
+    ``follow_source`` is the automatic refresh at launch: a file that cannot be copied safely is skipped (and counted)
+    instead of keeping the CLI from opening. Links in the profile are never read, written or removed through."""
     tool = account["tool"]
-    summary = {"copied": 0, "removed": 0, "settings": []}
-    if not sharing_enabled(account):
-        return summary
+    summary = {"copied": 0, "removed": 0, "settings": [], "skipped": 0, "linked": [], "limited": False}
     source = user_config_dir(tool, home)
     target = profile_dir(root, account)
     assert_private_path(source)
-    if not source.is_dir() or os.path.abspath(source) == os.path.abspath(target):
+    if os.path.abspath(source) == os.path.abspath(target):
         return summary
     private_dir(target)
+    managed = set(SHARE_DIRS[tool]) | set(SHARE_FILES[tool]) | {"settings.json", "config.toml"}
+    linked = sorted(entry.name for entry in os.scandir(target)
+                    if (entry.name in managed or entry.name.lower().endswith(".md")) and not _plain(Path(entry.path)))
+    summary["linked"] = linked
     manifest_path = target / SHARE_MANIFEST
     try:
         manifest = json.loads(read_private(manifest_path)) if manifest_path.is_file() else {}
@@ -729,87 +790,164 @@ def sync_extensions(account: dict, root: Path, home: Path | None = None) -> dict
         manifest = {}
     old_files = set(manifest.get("files", []))
     hashes = dict(manifest.get("file_hashes", {}))
-    files = _shareable_files(source, tool)
+    if not source.is_dir() and not follow_source:
+        return summary
+    files = _shareable_files(source, tool, follow_skill_links=follow_source)
+    if len(files) > SHARE_MAX_FILES:
+        if not follow_source:
+            raise ValueError("Too many extension files to share; trim " + str(source))
+        files, summary["limited"] = files[:SHARE_MAX_FILES], True
+    # (size, mtime) of source and copy when they were last compared: a launch skips reading files neither side changed.
+    known_stats = manifest.get("file_stats", {}) if follow_source and isinstance(manifest.get("file_stats"), dict) else {}
+    file_stats = {}
     wanted = set()
     for relative in files:
-        destination = target / relative
-        wanted.add(relative.as_posix())
-        data = read_private_bytes(source / relative)
-        if len(data) > SHARE_MAX_FILE:
-            raise ValueError("An extension grew beyond the import size limit")
-        digest = hashlib.sha256(data).hexdigest()
         name = relative.as_posix()
+        try:      # only skills may be links (followed on purpose); everything else was checked to be a plain file
+            origin = (source / relative).resolve() if follow_source and relative.parts[0] == "skills" else source / relative
+        except (OSError, RuntimeError):
+            origin = None
+        if origin is not None and any(part.lower() in NEVER_COPY for part in origin.parts):
+            continue  # A skill symlink must not disguise an authentication file as a Markdown resource.
+        wanted.add(name)      # before any failure: a file that cannot be read now is not "removed from the source"
+        if relative.parts[0] in linked:
+            continue
+        destination = target / relative
         try:
-            if destination.is_file():
-                current = read_private_bytes(destination)
-                if current == data:
-                    hashes[name] = digest
-                    continue
-                if hashlib.sha256(current).hexdigest() != hashes.get(name):
-                    continue
-            elif name in old_files:
-                continue  # A personally deleted extension stays deleted.
+            if origin is None:
+                raise ValueError("Cannot resolve the source extension")
+            seen = os.stat(origin)
+            try:
+                kept = destination.stat()
+                mark = [seen.st_size, seen.st_mtime_ns, kept.st_size, kept.st_mtime_ns]
+            except OSError:
+                mark = None
+            if mark is not None and name in hashes and known_stats.get(name) == mark:
+                file_stats[name] = mark
+                continue
+            data = read_private_bytes(origin)
+            if len(data) > SHARE_MAX_FILE:
+                raise ValueError("An extension grew beyond the import size limit")
+            digest = hashlib.sha256(data).hexdigest()
+            try:
+                if destination.is_file():
+                    current = read_private_bytes(destination)
+                    if current == data:
+                        hashes[name] = digest
+                    if current == data or hashlib.sha256(current).hexdigest() != hashes.get(name):
+                        if mark is not None:
+                            file_stats[name] = mark      # same answer next time unless one side changes
+                        continue
+                elif name in old_files:
+                    continue  # A personally deleted extension stays deleted.
+            except (OSError, ValueError):
+                raise ValueError("Cannot safely read the destination extension") from None
+            _write_private(destination, data)
+            hashes[name] = digest
+            kept = destination.stat()
+            file_stats[name] = [seen.st_size, seen.st_mtime_ns, kept.st_size, kept.st_mtime_ns]
+            summary["copied"] += 1
         except (OSError, ValueError):
-            raise ValueError("Cannot safely read the destination extension") from None
-        _write_private(destination, data)
-        hashes[name] = digest
-        summary["copied"] += 1
+            if not follow_source:
+                raise
+            summary["skipped"] += 1
+    if follow_source and not summary["limited"]:   # a truncated list cannot tell what the source removed
+        for name in sorted(old_files - wanted):
+            relative = Path(name)
+            allowed = (relative.parts and (relative.parts[0] in SHARE_DIRS[tool]
+                       or (len(relative.parts) == 1 and (relative.suffix.lower() == ".md" or name in SHARE_FILES[tool]))))
+            if (not allowed or relative.is_absolute() or ".." in relative.parts or "\\" in name
+                    or any(part.lower() in NEVER_COPY for part in relative.parts) or name not in hashes
+                    or relative.parts[0] in linked):
+                continue
+            destination = target / relative
+            try:
+                assert_private_path(destination)
+                if destination.is_file() and hashlib.sha256(read_private_bytes(destination)).hexdigest() == hashes[name]:
+                    destination.unlink()
+                    hashes.pop(name, None)
+                    old_files.discard(name)
+                    summary["removed"] += 1
+            except (OSError, ValueError):
+                summary["skipped"] += 1
     settings_snapshot = manifest.get("settings_snapshot", {})
     env_snapshot = manifest.get("env_snapshot", {})
-    if tool == "claude":
-        source_settings = source / "settings.json"
-        try:
-            user = json.loads(read_private(source_settings)) if source_settings.is_file() else {}
-            if not isinstance(user, dict):
-                raise ValueError("Expected a settings object")
-        except (OSError, ValueError):
-            raise ValueError("Cannot safely import the source Claude settings; repair settings.json") from None
-        shared, env = shared_settings(user)
-        settings_path = target / "settings.json"
-        try:
-            current = json.loads(read_private(settings_path)) if settings_path.is_file() else {}
-            if not isinstance(current, dict):
-                raise ValueError
-        except OSError:
-            current = {}
-        settings_snapshot = _merge_shared_settings(current, shared, settings_snapshot)
-        merged_env = dict(current["env"]) if isinstance(current.get("env"), dict) else {}
-        env_snapshot = _merge_shared_settings(merged_env, env, env_snapshot)
-        if merged_env:
-            current["env"] = merged_env
-        else:
-            current.pop("env", None)
-        summary["settings"] = sorted(shared)
-        _write_private(settings_path, json.dumps(current, ensure_ascii=False, indent=2).encode("utf-8"))
-    else:
-        try:
-            config = read_private(source / "config.toml") if (source / "config.toml").is_file() else ""
-            reduced = shared_codex_config(config) if (source / "config.toml").is_file() else None
-        except ImportError:
-            reduced = None                     # Python < 3.11 on a remote host: skip the config, keep the folders
-            summary["warning"] = "This host needs Python 3.11 to import Codex config.toml"
-        except ValueError:
-            raise ValueError("Cannot safely import the source Codex settings; repair config.toml") from None
-        config_path = target / "config.toml"
-        previous_hash = manifest.get("config_hash")
-        current_data = read_private_bytes(config_path) if config_path.is_file() else None
-        # Preserve edited TOML verbatim, including comments and settings outside the shared whitelist.
-        unchanged = current_data is not None and hashlib.sha256(current_data).hexdigest() == previous_hash
-        if reduced is not None and (unchanged or (current_data is None and previous_hash is None)):
-            if current_data is not None:
-                import tomllib
-                reduced = toml_dumps(_retain_missing(tomllib.loads(current_data.decode("utf-8-sig")),
-                                                    tomllib.loads(reduced)))
-            data = reduced.encode("utf-8")
-            _write_private(config_path, data)
-            manifest["config_hash"] = hashlib.sha256(data).hexdigest()
-            summary["settings"] = ["config.toml"]
-    manifest.update({"files": sorted(old_files | wanted), "file_hashes": hashes,
-                     "plugin_dirs": user_plugin_dirs(account, home),
+    try:
+        if tool == "claude" and "settings.json" not in linked:
+            source_settings = source / "settings.json"
+            try:
+                user = json.loads(read_user_text(source_settings)) if source_settings.is_file() else {}
+                if not isinstance(user, dict):
+                    raise ValueError("Expected a settings object")
+            except (OSError, ValueError):
+                raise ValueError("Cannot safely import the source Claude settings; repair settings.json") from None
+            shared, env = shared_settings(user)
+            settings_path = target / "settings.json"
+            try:
+                current = json.loads(read_private(settings_path)) if settings_path.is_file() else {}
+                if not isinstance(current, dict):
+                    raise ValueError
+            except OSError:
+                current = {}
+            managed_settings = _merge_shared_settings(current, shared, settings_snapshot, follow_source)
+            merged_env = dict(current["env"]) if isinstance(current.get("env"), dict) else {}
+            managed_env = _merge_shared_settings(merged_env, env, env_snapshot, follow_source)
+            if merged_env:
+                current["env"] = merged_env
+            else:
+                current.pop("env", None)
+            _write_private(settings_path, json.dumps(current, ensure_ascii=False, indent=2).encode("utf-8"))
+            settings_snapshot, env_snapshot = managed_settings, managed_env   # only what was really written
+            summary["settings"] = sorted(shared)
+        elif tool == "codex" and "config.toml" not in linked:
+            config_source = source / "config.toml"
+            try:
+                reduced = shared_codex_config(read_user_text(config_source)) if config_source.is_file() else None
+            except ImportError:
+                reduced = None                     # Python < 3.11 on a remote host: skip the config, keep the folders
+                summary["warning"] = "This host needs Python 3.11 to import Codex config.toml"
+            except ValueError:
+                raise ValueError("Cannot safely import the source Codex settings; repair config.toml") from None
+            config_path = target / "config.toml"
+            previous_hash = manifest.get("config_hash")
+            current_data = read_private_bytes(config_path) if config_path.is_file() else None
+            # Preserve edited TOML verbatim, including comments and settings outside the shared whitelist.
+            unchanged = current_data is not None and hashlib.sha256(current_data).hexdigest() == previous_hash
+            if reduced is not None and (unchanged or (current_data is None and previous_hash is None)):
+                if current_data is not None and not follow_source:
+                    import tomllib
+                    reduced = toml_dumps(_retain_missing(tomllib.loads(current_data.decode("utf-8-sig")),
+                                                        tomllib.loads(reduced)))
+                data = reduced.encode("utf-8")
+                _write_private(config_path, data)
+                manifest["config_hash"] = hashlib.sha256(data).hexdigest()
+                summary["settings"] = ["config.toml"]
+            elif follow_source and unchanged and not config_source.exists():
+                config_path.unlink()
+                manifest.pop("config_hash", None)
+    except (OSError, ValueError, TypeError):
+        if not follow_source:
+            raise
+        summary["skipped"] += 1
+    manifest.update({"files": sorted(old_files | wanted), "file_hashes": hashes, "file_stats": file_stats,
                      "settings": list(settings_snapshot), "env": list(env_snapshot),
                      "settings_snapshot": settings_snapshot, "env_snapshot": env_snapshot})
     _write_private(manifest_path, json.dumps(manifest).encode("utf-8"))
     return summary
+
+
+def read_user_text(path: Path, limit: int = 1048576) -> str:
+    """A file the user owns outside launcher data (settings.json, config.toml, plugin registry).
+
+    Links and ordinary permissions (0644) are fine here: callers only take whitelisted values from it."""
+    with os.fdopen(os.open(path, os.O_RDONLY), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or (os.name != "nt" and info.st_uid != os.getuid()):
+            raise ValueError("Unsupported user file: " + str(path))
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("User file exceeds size limit: " + str(path))
+    return data.decode("utf-8-sig")
 
 
 def read_private_bytes(path: Path, limit: int = SHARE_MAX_FILE) -> bytes:
@@ -818,17 +956,25 @@ def read_private_bytes(path: Path, limit: int = SHARE_MAX_FILE) -> bytes:
         return stream.read(limit + 1)
 
 
-def user_plugin_dirs(account: dict, home: Path | None = None) -> list[str]:
+def user_plugin_dirs(account: dict, home: Path | None = None, *, project: Path | None = None) -> list[str]:
     """Claude plugins the user installed and enabled, passed with --plugin-dir (their paths are absolute, so copying breaks them)."""
-    if account.get("tool") != "claude" or not sharing_enabled(account):
+    if account.get("tool") != "claude":
         return []
     base = user_config_dir("claude", home)
     plugins = base / "plugins"
     try:
-        installed = json.loads((plugins / "installed_plugins.json").read_text(encoding="utf-8-sig")).get("plugins", {})
-        settings = json.loads((base / "settings.json").read_text(encoding="utf-8-sig"))
-        enabled = settings.get("enabledPlugins", {}) if isinstance(settings, dict) else {}
-    except (OSError, ValueError, AttributeError):
+        installed = json.loads(read_user_text(plugins / "installed_plugins.json")).get("plugins", {})
+        settings = json.loads(read_user_text(base / "settings.json"))
+        enabled = dict(settings.get("enabledPlugins", {})) if isinstance(settings, dict) else {}
+        if project is not None:
+            # Only the project folder itself: a parent such as C:\ or /tmp may hold a .claude folder someone else made.
+            for filename in ("settings.json", "settings.local.json"):
+                path = project / ".claude" / filename
+                if path.is_file():
+                    local = json.loads(read_user_text(path)).get("enabledPlugins", {})
+                    if isinstance(local, dict):
+                        enabled.update(local)
+    except (OSError, ValueError, AttributeError, TypeError):
         return []
     found = []
     for name, entries in installed.items() if isinstance(installed, dict) else []:
@@ -838,7 +984,9 @@ def user_plugin_dirs(account: dict, home: Path | None = None) -> list[str]:
             if not isinstance(entry, dict):
                 continue
             path = Path(str(entry.get("installPath", "")))
-            if entry.get("scope", "user") == "user" and path.is_dir() and _plain(path) and str(path) not in found:
+            scope = entry.get("scope", "user")
+            in_project = project is not None and _same_project_path(entry.get("projectPath"), str(project))
+            if (scope == "user" or (scope in {"project", "local"} and in_project)) and path.is_dir() and _plain(path) and str(path) not in found:
                 try:
                     path.resolve().relative_to(plugins.resolve())
                 except ValueError:
@@ -847,34 +995,11 @@ def user_plugin_dirs(account: dict, home: Path | None = None) -> list[str]:
     return found
 
 
-def imported_plugin_dirs(account: dict, root: Path) -> list[str]:
-    """Read only the explicit import snapshot; launching never scans the source plugin registry."""
-    if account.get("tool") != "claude":
-        return []
-    path = profile_dir(root, account) / SHARE_MANIFEST
-    if not path.is_file():
-        return []
-    data = json.loads(read_private(path))
-    paths = data.get("plugin_dirs", [])
-    if not isinstance(paths, list) or len(paths) > SHARE_MAX_FILES:
-        raise ValueError("Invalid imported plugin snapshot; import settings again")
-    result = []
-    for value in paths:
-        if not isinstance(value, str) or not Path(value).is_absolute():
-            raise ValueError("Invalid imported plugin path")
-        plugin = Path(value)
-        assert_private_path(plugin)
-        if plugin.is_dir() and value not in result:
-            result.append(value)
-    return result
-
-
 def manual_import(account: dict, root: Path, kind: str, home: Path | None = None) -> dict:
-    """Import only on explicit request, regardless of migrated legacy sharing preferences."""
+    """The Accounts page's import button: refresh settings or conversations right now."""
     if account.get("tool") not in {"codex", "claude"} or kind not in {"settings", "history"}:
         raise ValueError("Unknown import kind or tool")
-    source = dict(account, share_extensions=True, import_history=True)
-    summary = sync_extensions(source, root, home) if kind == "settings" else sync_history(source, root, home)
+    summary = sync_extensions(account, root, home) if kind == "settings" else sync_history(account, root, home)
     return {"status": "imported", "kind": kind, "summary": summary}
 
 
@@ -954,7 +1079,7 @@ def mark_onboarded(account: dict, root: Path) -> None:
 
 
 def _copy_transcripts(tool: str, source: Path, base: Path, target: Path, summary: dict, budget: dict,
-                      want_path=None, want_record=None) -> None:
+                      want_path=None, want_record=None, refresh: bool = False) -> None:
     """Copy transcripts under ``base`` (inside ``source``) into the same relative place under ``target``.
 
     Existing files are never replaced. ``want_path(path)`` / ``want_record(first_record)`` narrow what is imported (for
@@ -983,7 +1108,11 @@ def _copy_transcripts(tool: str, source: Path, base: Path, target: Path, summary
                     destination = target / path.relative_to(source)
                     assert_private_path(destination)
                     if destination.exists():
-                        continue
+                        if not refresh:
+                            continue
+                        kept, seen = destination.stat(), entry.stat(follow_symlinks=False)
+                        if kept.st_size > seen.st_size or (kept.st_size, kept.st_mtime_ns) == (seen.st_size, seen.st_mtime_ns):
+                            continue  # unchanged (copies keep the source mtime) or continued here: nothing to add
                     if want_path is not None and not want_path(path):
                         continue
                     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -1016,6 +1145,11 @@ def _copy_transcripts(tool: str, source: Path, base: Path, target: Path, summary
                             # Paginated Codex sessions store turns in SQLite, not this transcript.
                             summary["skipped"] += 1
                             continue
+                    previous = None
+                    if destination.exists():
+                        previous = read_private_bytes(destination, limit=64 * 1024 * 1024)
+                        if not previous or not previous.endswith(b"\n") or previous == data or not data.startswith(previous):
+                            continue  # A locally continued or edited conversation must never be replaced.
                     private_dir(destination.parent)
                     temporary = destination.with_name(destination.name + "." + uuid.uuid4().hex + ".tmp")
                     assert_private_path(temporary)
@@ -1024,7 +1158,12 @@ def _copy_transcripts(tool: str, source: Path, base: Path, target: Path, summary
                         stream.write(data)
                     os.utime(temporary, ns=(before.st_atime_ns, before.st_mtime_ns))
                     assert_private_path(destination)
-                    if os.name == "nt":
+                    if previous is not None:
+                        if read_private_bytes(destination, limit=64 * 1024 * 1024) != previous:
+                            summary["skipped"] += 1
+                            continue
+                        os.replace(temporary, destination)
+                    elif os.name == "nt":
                         os.rename(temporary, destination)  # Windows rename refuses an existing destination.
                     else:
                         os.link(temporary, destination)    # Atomic no-replace publication on the SSH host.
@@ -1039,11 +1178,9 @@ def _copy_transcripts(tool: str, source: Path, base: Path, target: Path, summary
                         temporary.unlink(missing_ok=True)
 
 
-def sync_history(account: dict, root: Path, home: Path | None = None) -> dict:
+def sync_history(account: dict, root: Path, home: Path | None = None, *, refresh: bool = False) -> dict:
     """Import absent transcript snapshots; never merge credentials, indexes, or live profile files."""
     summary = {"copied": 0, "skipped": 0, "limited": False}
-    if account.get("import_history", False) is not True:
-        return summary
     tool = account["tool"]
     source = user_config_dir(tool, home)
     target = profile_dir(root, account)
@@ -1054,7 +1191,7 @@ def sync_history(account: dict, root: Path, home: Path | None = None) -> dict:
     if not base.is_dir() or os.path.abspath(source) == os.path.abspath(target):
         return summary
     # ponytail: bounded snapshots; large archives need a dedicated import flow.
-    _copy_transcripts(tool, source, base, target, summary, {"visited": 0, "copied": 0})
+    _copy_transcripts(tool, source, base, target, summary, {"visited": 0, "copied": 0}, refresh=refresh)
     return summary
 
 
@@ -1077,11 +1214,11 @@ def claude_project_folder(project_path: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", project_path)
 
 
-def sync_project_history(account: dict, root: Path, project_path: str) -> dict:
+def sync_project_history(account: dict, root: Path, project_path: str, home: Path | None = None) -> dict:
     """Make this account's profile see the conversations other accounts of the same tool had in ``project_path``.
 
-    Only conversation files of that one project are copied (absent ones only, from the launcher's own profiles on this
-    machine); credentials, settings and indexes are never touched. Safe to repeat: that is the "refresh"."""
+    Sources include the user's native CLI home and other launcher profiles in this environment.
+    Only absent transcripts of that project are copied; credentials and indexes are never touched."""
     summary = {"copied": 0, "skipped": 0, "limited": False, "sources": 0}
     tool = account.get("tool")
     if tool not in {"codex", "claude"} or not project_path:
@@ -1089,8 +1226,6 @@ def sync_project_history(account: dict, root: Path, project_path: str) -> dict:
     target = profile_dir(root, account)
     assert_private_path(target)
     parent = target.parent
-    if not parent.is_dir():
-        return summary
     folder = "sessions" if tool == "codex" else "projects"
     if tool == "codex":
         def want_path(path: Path) -> bool:
@@ -1101,7 +1236,8 @@ def sync_project_history(account: dict, root: Path, project_path: str) -> dict:
         def want_path(path: Path) -> bool:
             return expected in path.parts[:-1]
     budget = {"visited": 0, "copied": 0}
-    for sibling in sorted(parent.iterdir()):
+    sources = [user_config_dir(tool, home)] + (sorted(parent.iterdir()) if parent.is_dir() else [])
+    for sibling in sources:
         if sibling == target or sibling.name == target.name:
             continue
         base = sibling / folder
@@ -1112,11 +1248,45 @@ def sync_project_history(account: dict, root: Path, project_path: str) -> dict:
                 continue
             summary["sources"] += 1
             _copy_transcripts(tool, sibling, base, target, summary, budget, want_path=want_path)
-        except OSError:
+        except (OSError, ValueError):
             summary["skipped"] += 1
         if summary["limited"]:
             break
     return summary
+
+
+def sync_user_data(account: dict, root: Path, project_path: str, home: Path | None = None, *, session_id: str = "") -> dict:
+    """Refresh native user data on the machine running the CLI, while keeping credentials isolated.
+
+    Every stage is best effort: a stage that fails is named in ``failed`` and never keeps the CLI from opening."""
+    source = account
+    result = {"extensions": {}, "history": {"copied": 0, "skipped": 0, "limited": False}, "failed": []}
+    try:
+        result["extensions"] = sync_extensions(source, root, home, follow_source=True)
+    except Exception:
+        result["failed"].append("extensions")
+    try:
+        refresh = True
+        for path in (root / "sessions").glob("*.json"):
+            try:
+                record = json.loads(read_private(path))
+                same_account = record.get("account", {}).get("id") == account["id"]
+                if same_account and record.get("session_id") != session_id and record.get("status") not in {"ended", "failed"}:
+                    refresh = False
+                    break  # Another CLI may be appending to a profile transcript; only add absent files then.
+            except (OSError, ValueError, AttributeError):
+                refresh = False
+                break
+        if not (account["tool"] == "codex" and native_codex_state(home)):
+            result["history"] = sync_history(source, root, home, refresh=refresh)
+    except Exception:
+        result["failed"].append("history")
+    if account.get("share_project_history") is True:
+        try:
+            sync_project_history(account, root, project_path, home)
+        except Exception:
+            result["failed"].append("project history")
+    return result
 
 
 def prepare(account: dict, root: Path) -> dict:
@@ -1426,7 +1596,7 @@ def list_sessions(request: dict, root: Path) -> None:
                 status = "running"
             elif status in {"running", "detached", "connecting", "waiting_auth"}:
                 status = "unknown"  # Server loss/reboot is not proof of a clean CLI exit.
-        elif status == "running":
+        elif status in RECORDED_ACTIVE:
             status = "unknown"  # Last recorded state alone cannot prove a process is alive.
         emit(request, {"session_id": record["session_id"], "status": status})
 
@@ -1446,12 +1616,17 @@ def run_worker(request: dict, root: Path, env: dict | None = None) -> int:
         save_status(root, request, "ended")
         return 0
     if not shell:
+        try:
+            summary = sync_user_data(request["account"], root, request["path"], session_id=request["session_id"])
+        except Exception:                      # a refresh that fails must never keep the CLI from opening
+            summary = {"failed": ["all"]}
+        extensions, history = summary.get("extensions") or {}, summary.get("history") or {}
+        if summary.get("failed") or extensions.get("skipped") or extensions.get("limited") or history.get("limited"):
+            print(tr("Some user data could not be refreshed; starting with what this profile already has."), flush=True)
+        if extensions.get("linked"):
+            print(tr("Links in this profile were left untouched: {names}. Remove the links (not their targets) so they can be refreshed.",
+                     names=", ".join(extensions["linked"])), flush=True)
         mark_onboarded(request["account"], root)
-        if request["account"].get("share_project_history") is True:
-            try:
-                sync_project_history(request["account"], root, request["path"])
-            except (OSError, ValueError):
-                pass                         # a conversation that cannot be shared must never stop the terminal from opening
     profile = request.get("terminal_profile")
     if shell and profile and profile.get("profile_env"):
         directory = root / "profiles" / "plugins" / safe_id(profile["id"])
@@ -1461,8 +1636,13 @@ def run_worker(request: dict, root: Path, env: dict | None = None) -> int:
             if key.upper().startswith(("CODEX_", "CLAUDE_", "ANTHROPIC_", "OPENAI_")) or key.upper() == "CLAUDECODE":
                 del env[key]
         env[profile["profile_env"]] = str(directory)
-    command = shell_command(profile) if shell and profile else shell_command() if shell else cli_command(request["account"], "launch", root)
-    process = subprocess.Popen(command, cwd=request["path"], env=env)
+    try:
+        command = shell_command(profile) if shell and profile else shell_command() if shell else cli_command(request["account"], "launch", root, "device",
+                                                                                                          Path(request["path"]), request.get("resume") is True)
+        process = subprocess.Popen(command, cwd=request["path"], env=env)
+    except Exception:
+        save_status(root, request, "failed")  # the record must not stay "waiting for sign-in" forever
+        raise
     save_status(root, request, "running", pid=process.pid)
     try:
         while process.poll() is None:

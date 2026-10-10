@@ -3,7 +3,7 @@
     python scripts/release_notes.py check v1.2.3        # tag matches pyproject.toml and CHANGELOG.md has the section
     python scripts/release_notes.py notes v1.2.3 OUT.md # write that section's body (without its heading)
 
-The launcher's updater reads the body back with ``updates.parse_changelog``, so keep ``### 設定變更`` lines intact.
+The launcher's updater reads the body back with ``updates.parse_changelog``: its bullets become the release notes.
 """
 import re
 import sys

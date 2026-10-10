@@ -2,9 +2,35 @@
 
 README（[English](../README.md)／[繁體中文](../README.zh-TW.md)／[简体中文](../README.zh-CN.md)）只放簡介與入門；這裡保留各功能的完整說明、安全細節與限制。
 
+## 多專案工作區
+
+Workspace 是可命名的工作桌面，可同時放入不同專案、帳號與環境的終端；Session（工作階段）是一次 CLI 或 shell 執行。專案頁的抽屜列出工作階段，不代表專案各自擁有工作區。
+
+在「工作區」頁上方的工作區選單按「新增工作區」，輸入名稱後得到空白桌面，再從左側快速開啟所需專案。下拉選單可切換桌面，`Ctrl+K` 也可搜尋「切換工作區」。每個桌面保留自己的終端順序、分頁／並排排列、選取位置與輸入內容；切換不會重新啟動或停止程序。同一個專案可以出現在多個桌面。
+
+「預設工作區」可直接開始使用；工作區選單的「將目前的終端機儲存為工作區…」可把目前的終端存成一個具名工作區。每個工作區保存專案與終端配置（最多 16 個終端，見下方「自動保存與恢復」）。切換桌面保留執行狀態，但關閉 Launcher 不會保留本機程序：重新啟動後本機 Codex／Claude 以接續對話的方式重開，SSH tmux 工作重新接回。
+
+刪除儲存的工作區會要求確認；若桌面仍開著，會以「未儲存的工作區」保留至 Launcher 關閉，不停止其中的終端。既有儲存配置可直接使用。本機已結束或失敗的工作階段紀錄會自動清除（要重開的內容由工作區記得）；SSH 的已結束紀錄保留最新 20 筆，也可從「工作階段」頁清理。
+
+**自動保存與恢復**：每個工作區（含預設工作區）在開啟或關閉終端時即時保存配置，所以強制關閉或當機也不會遺失。結束後仍留在畫面上的終端（顯示「已結束」）仍算在配置內，直到你關掉它；關閉 Launcher 不算「關掉終端」。下次啟動會回到上次的工作區，右上角出現「恢復 N 個終端」，按下才啟動：SSH tmux 工作重新接回，Codex／Claude 以 `--continue`（Claude）、`resume --last`（Codex）接續該資料夾上次的對話（沒有可接續的對話時正常開新的）。預設工作區的配置存在 `ui-state.json` 的 `default_workspace`，上次的工作區在 `last_workspace`。恢復不會重複開啟已經開著的同專案終端；某個終端恢復失敗時會留在待恢復清單（配置不會被清掉），再按「恢復」可重試；專案已刪除的槽位會從配置移除。重啟後在工作區裡等待恢復的專案，在專案頁與首頁標示「可恢復」，按鈕會走恢復流程。
+
+注意：接續的是該資料夾「最近一次」的對話，來源包含你在 Launcher 外用原生 CLI 開的對話（Codex 也共用原生對話索引）；若那個原生對話正在另一個視窗進行，兩邊會各自分岔，但不會損毀檔案。
+
+**重新載入與送出確認**：終端標題列的重新載入鈕會在原位置重啟該終端（tmux 終端改為重新接回；Codex／Claude 接續上次對話）。重新載入，以及在輸入列按 Enter 送出時都會先確認，可勾選「不再詢問」；之後可在「設定 → 終端 → 確認通知」重新開啟（`confirm_reload`、`confirm_send`）。
+
+**名稱與圖示**：每個工作區（含「預設工作區」）都可改名並選圖示——工作區選單「編輯名稱與圖示…」、首頁卡片的鉛筆鈕或 `Ctrl+K` 的「編輯目前工作區的名稱與圖示…」。圖示對話框與專案圖示相同（內建圖示、圖片或可換色的 SVG），預設是公事包。已儲存工作區的名稱寫回工作區紀錄；預設工作區的名稱與所有工作區的圖示是檢視偏好，存在 `ui-state.json` 的 `default_workspace_name`、`workspace_icons`，不隨設定匯出。工作區選單、頁首圖示、指令面板與首頁都會顯示。
+
+**首頁**：「工作區」區塊每個工作區一張卡片，顯示專案數、開啟中與執行中的終端，目前所在的標示「目前」；點卡片即切換過去，右上「新增工作區」直接建立新桌面。
+
+**專案頁與工作區**：
+- 專案清單第二行與詳細資料標題下方會列出專案所在的工作區（已載入的桌面以目前開著的終端為準，尚未開啟的已存工作區以儲存的配置為準）；點標籤即切換到該工作區。
+- 「開啟到工作區…」可選目前、其他或新增的工作區。若切換時還原的配置已經開了這個專案，會直接選取那個終端，不重複開啟。使用外部終端視窗時不提供此功能。
+- 篩選列的工作區下拉可只看某個工作區的專案，或「未加入工作區」的專案。
+- 工作階段抽屜依終端所在的工作區分組，未開啟的排在最後；摘要會寫出開在哪些工作區。
+
 ## 語言與統一設定
 
-介面預設為 **English**，另提供繁體中文（台灣）。從側邊欄 **Settings／設定** 或 `Ctrl+,` 開啟設定，管理語言、外觀、快捷鍵、輸入列位置、預設 shell 與 CLI 擴充。語言變更在重新啟動 Launcher 後生效；快捷鍵與輸入列位置會立即套用。帳號與 SSH 的登入設定可從同一入口前往對應頁面。
+介面預設為 **English**，另提供繁體中文（台灣）、簡體中文、日文、韓文、德文與西班牙文。從側邊欄 **Settings／設定** 或 `Ctrl+,` 開啟設定，管理語言、外觀、快捷鍵、輸入列位置、預設 shell 與 CLI 擴充。語言變更在重新啟動 Launcher 後生效；快捷鍵與輸入列位置會立即套用。帳號與 SSH 的登入設定可從同一入口前往對應頁面。
 
 | 預設快捷鍵 | 動作 |
 | --- | --- |
@@ -44,14 +70,14 @@ README（[English](../README.md)／[繁體中文](../README.zh-TW.md)／[简体�
 
 ### 集中維護翻譯
 
-所有介面文字放在 `src/vibe_launcher/locales/`：`en.json` 為主要語言，`zh-TW.json` 為繁體中文，`sources.json` 記錄既有文字的來源位置。英文用語採用 Terminal、Workspace、Session、Attach／Detach、Subscription 等工具常見名稱。新增文案呼叫 `i18n.tr()`，兩份 catalog 使用相同 key，並保留 `{v0}` 等命名參數；未翻譯的文字回退到英文。
+所有介面文字放在 `src/vibe_launcher/locales/`：`en.json` 為主要語言，另有 `zh-TW`、`zh-CN`、`ja`、`ko`、`de`、`es`，`sources.json` 記錄既有文字的來源位置。英文用語採用 Terminal、Workspace、Session、Attach／Detach、Subscription 等工具常見名稱。新增文案呼叫 `i18n.tr()`，所有 catalog 使用相同 key，並保留 `{v0}` 等命名參數；未翻譯的文字回退到英文。
 
 ```powershell
 uv run python scripts/check_translations.py --sync
 uv run python scripts/check_translations.py
 ```
 
-`--sync` 新增英文 source key，不覆蓋既有翻譯；請補上對應繁體中文再提交。未來新增語言時，建立另一份 catalog 並在 `i18n.LANGUAGES` 登錄語系。
+`--sync` 新增英文 source key，不覆蓋既有翻譯；請補上各語系翻譯再提交。未來新增語言時，建立另一份 catalog 並在 `i18n.LANGUAGES` 登錄語系。
 
 ## 啟動
 
@@ -70,7 +96,7 @@ uv run vibe-launcher
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/create-shortcut.ps1
 ```
 
-如果你的 `python` 指向 LibreOffice 等內嵌版本，請使用完整 Python 安裝：`uv sync --python C:\完整Python路徑\python.exe`。本次開發環境已建立 `.venv`；不用重裝。
+如果你的 `python` 指向 LibreOffice 等內嵌版本，請使用完整 Python 安裝：`uv sync --python C:\完整Python路徑\python.exe`。
 
 ## 第一次使用
 
@@ -86,7 +112,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/create-shortcut.ps1
 
 既有 `IdentityFile` 與 `ProxyJump` 直接沿用 `%USERPROFILE%\.ssh\config`，不需要重新建立或註冊 key。環境的 SSH target 填 `Host` 後面的 alias（允許底線），不要填 `Host ` 前綴。按「SSH 設定」可在不連線、不讀私鑰的情況下列出 IdentityFile 候選路徑與 ProxyJump。候選路徑不表示該檔案一定存在或曾成功驗證。使用既有 key 請選「金鑰」或「互動驗證」；純「密碼」模式會刻意停用公鑰驗證。
 
-主機 fingerprint 是伺服器身分，與用來登入的 IdentityFile 不同。指紋確認視窗按「取消連線」後，新啟動的 session 會標為 `failed`，可移除本機紀錄後重試。舊版留下的 `unknown` 紀錄可按「移除本機紀錄」，確認後僅移除 App 的紀錄，不會停止遠端程序；移除後也會失去該筆 App 重連入口。若要刪除環境，還需要先修改或移除引用它的專案設定。
+主機 fingerprint 是伺服器身分，與用來登入的 IdentityFile 不同。指紋確認視窗按「取消連線」後，新啟動的 session 會標為 `failed`，可移除本機紀錄後重試。`unknown` 紀錄可按「移除本機紀錄」，確認後僅移除 App 的紀錄，不會停止遠端程序；移除後也會失去該筆 App 重連入口。若要刪除環境，還需要先修改或移除引用它的專案設定。
 
 ### 減少 SSH 密碼輸入
 
@@ -131,7 +157,7 @@ CLI 在其他位置時，把它安裝或建立符號連結到 `/usr/local/bin`�
 
 ### 首頁、設定與訊息
 
-- **首頁**：點左上角的 logo 開啟，也是啟動後的第一頁。上方顯示執行中、需重新登入、狀態不明的數量（點一下跳到對應頁）；下面是最近 6 個專案，執行中的按「接回」、其他按「開啟」；最下方是各環境狀態。有新版本時會出現更新卡片。
+- **首頁**：點左上角的 logo 開啟，也是啟動後的第一頁。上方顯示執行中、需重新登入、狀態不明的數量（點一下跳到對應頁）；接著是各工作區的卡片（見「多專案工作區」）；下面是最近 6 個專案，執行中的按「重新連線」，標示「可恢復」的按「恢復」（回到所在工作區並接續），其他按「開啟」；最下方是各環境狀態。有新版本時會出現更新卡片。
 - **設定**（側邊欄齒輪或 `Ctrl+,`）：左側依類別切換：一般、外觀、終端、快捷鍵、擴充、關於與更新。外觀變更即時預覽，按取消會還原。快捷鍵依用途分組、可搜尋（名稱或按鍵），重複的按鍵會標紅且無法儲存。
 - **訊息**：顯示在視窗上方中央。滑鼠停在訊息上會暫停計時；錯誤訊息不會自動消失，需按 × 關閉。拖曳任一則可移動整組訊息，位置會記住；在訊息上按右鍵可放回原位。
 - **新增／編輯對話框**：輸入有問題時錯誤直接顯示在對話框內，不會關掉；搭配輸入暫存，打到一半也不會遺失。
@@ -155,15 +181,31 @@ CLI 在其他位置時，把它安裝或建立符號連結到 `/usr/local/bin`�
 - **辨認帳號與調整位置**：終端標題、左側清單與指令面板會顯示帳號名稱（這是 Launcher 的帳號標籤，實際登入身分仍以官方 CLI 為準）。選取終端後按清單上方 **↑／↓**，可往前／後移一格；並排依左至右、上至下排列，不中斷連線。相鄰的同專案終端會分組。排列後儲存工作區，可保留順序、帳號與環境；以相同名稱儲存即可更新。
 - **切換 Terminal 與 Codex／Claude**：終端標題列的「切換」按鈕，列出專案綁定環境中可開的其他 Agent 與終端機。
 - **離開但保持連線／執行**：標題列「離開」（`Ctrl+Shift+D`）對使用 tmux 的 SSH 終端送出 tmux 的 detach，終端關掉、工作留在伺服器；之後可從工作階段頁或工作區重新接回。**不必按 `Ctrl+C`，也不必直接關視窗**。沒有使用 tmux 的終端離開就會結束，這時只要切換到別的分頁，連線會留著。關閉分頁（`Ctrl+Shift+W`）對 tmux 終端同樣是先離開再關閉。
-- **已儲存的工作區**：開好一組終端後，「工作區」按鈕 → 「將目前的終端儲存為工作區…」，之後一鍵重新開啟整組（含排列方式）。工作區會一併匯出／匯入。
+- **已儲存的工作區**：開好一組終端後，工作區選單 → 「將目前的終端機儲存為工作區…」，之後切換過去即可帶回整組（含排列方式）；之後的開關終端會自動保存。工作區會一併匯出／匯入。
 - 終端內的 `Ctrl+B`（tmux）、`Ctrl+C`、`Ctrl+K` 預設送進終端。工作區切換、導覽、設定與視窗切換等 App 動作使用設定頁列出的快捷鍵，可自訂。選取文字後按 `Ctrl+C` 或 `Ctrl+Shift+C` 複製；沒有選取時 `Ctrl+C` 仍是中斷。
 - **輸入列（中文輸入）**：Codex／Claude 終端下方預設有一個原生輸入框（標題列的鍵盤按鈕或 `Ctrl+Shift+E` 開關／切換焦點）。在這裡打中文，輸入法的選字框就在輸入處旁邊，可自由移動游標修改；`Enter` 送出、`Shift+Enter` 換行，多行內容會以一次貼上送出，不會中途被 Enter 送出。`Esc`、`Ctrl+C`（沒有選取時）一律傳給程式；輸入框空白時 `↑ ↓ Tab Shift+Tab Enter` 也傳給程式，方便操作選單。`Ctrl+↑／↓` 叫回送出過的內容。SSH 終端預設不顯示，可在「外觀」調整預設。
 - 登入驗證、host key 確認與 OTP 仍在終端內完成。遠端印出的任何內容都只當資料處理：網頁只能載入打包在 App 內的檔案、禁止導覽，也沒有可點擊的連結。
-- 想用舊的獨立視窗：指令面板「改用外部終端視窗」。內建終端無法啟動時（例如系統不支援 ConPTY）會自動改用外部視窗。關閉 App 時若還有連線中的終端會先詢問：tmux 工作繼續，直接執行的工作會結束。
+- 想用舊的獨立視窗：指令面板「改用外部終端視窗」。內建終端無法啟動時（例如系統不支援 ConPTY）會自動改用外部視窗。關閉 App 時若還有執行中的終端會先詢問：只有本機（或沒有 tmux 的 SSH）終端時說明會結束其中的工作；有 tmux 工作時說明它們會留在伺服器。關閉後，本機終端的工作階段直接記為「已結束」。
+
+### 終端流量控制與同機效能量測
+
+ConPTY 到 Qt、Chromium、xterm 的未確認原始輸出共同限制為每端 256 KiB。xterm 完成寫入才釋放額度；消費者變慢會使來源等待，不截斷 UTF-8 或控制序列。關閉終端解除等待並終止本機工作；正常輸出停止後會繼續排空。
+
+終端預設使用 xterm.js 的 DOM 渲染器：WebGL 渲染器在 Qt WebEngine（Windows）中重繪時可能出現斜角黑塊閃爍。若要比較或改回 WebGL，啟動前設定環境變數 `VIBE_TERMINAL_WEBGL=1`。
+
+使用 `scripts/benchmark_workspace.py` 分別量測 0／4／8 個合成終端。腳本記錄行程樹 CPU、RAM、切頁到 JavaScript 回應的延遲、各端積壓／峰值及排空時間，並用 `widget.grab()` 保存視窗截圖；不讀取帳號或專案資料。
+
+```powershell
+.venv/Scripts/python.exe scripts/benchmark_workspace.py --terminals 0 --duration 60 --output .benchmark/control-0.json
+.venv/Scripts/python.exe scripts/benchmark_workspace.py --terminals 4 --duration 60 --output .benchmark/control-4.json
+.venv/Scripts/python.exe scripts/benchmark_workspace.py --terminals 8 --duration 1800 --output .benchmark/stress-8.json
+```
+
+同機比較須採相同 duration、輸出速率與 renderer 模式；CPU 百分比以一核心為 100%，RAM 包含 WebEngine／ConPTY 子程序。`--offscreen --software` 可用於離屏軟體繪圖，但結果不代表正常桌面 GPU 效能。沙箱若阻止 renderer 啟動，30 秒後標記 `startup_unavailable`；未成功啟動或未排空不能算驗收通過。切頁量測是 UI 與 renderer 回應時間，並非 GPU 畫面呈現完成時間。
 
 ## 專案狀態、tmux 開關與工作階段
 
-**每個專案顯示自己的狀態**：運行中（綠）、背景執行（藍）、連線中（藍）、等待驗證（黃）、已停止（灰）、失敗（紅）、狀態不明（灰）；從未啟動的專案不顯示標籤。專案有多筆工作階段時，優先顯示仍可能存活的那一筆。專案詳細資訊也會寫出「狀態」與「執行方式」。
+**每個專案顯示自己的狀態**：運行中（綠）、背景執行（藍）、連線中（藍）、等待驗證（黃）、已停止（灰）、失敗（紅）、狀態不明（灰）；從未啟動的專案不顯示標籤；重啟後在工作區等待恢復的專案顯示「可恢復」（藍）。專案有多筆工作階段時，優先顯示仍可能存活的那一筆。專案詳細資訊也會寫出「狀態」與「執行方式」。
 
 **「關閉終端後讓工作繼續執行」開關**（新增／編輯專案，預設開啟）：
 
@@ -181,47 +223,33 @@ tmux 只在「開啟」的 SSH 專案啟動時才是必要條件；單純的環�
 
 按鈕只在有意義時才可點，選取一筆後下方會用一句話說明目前狀況。**被直接關掉的終端**會讓本機再也收不到結果，這類工作會自動變成「狀態不明」（遠端 tmux 工作可能仍在跑），按「更新工作狀態」即可向伺服器查詢。互動期間無法即時更新狀態，所以你在終端裡時會看到「連線中」，離開後才變成最終狀態。
 
-## Skills、hooks 與多 agent 工作流
+## Skills、plugins 與原有對話
 
-每個帳號都有自己獨立的設定資料夾（`CLAUDE_CONFIG_DIR` / `CODEX_HOME`），所以預設看不到你 `~/.claude`、`~/.codex` 裡的東西。在帳號頁明確執行「匯入設定」時，Launcher 才把白名單內的個人設定與擴充**複製**進該帳號的資料夾；日常啟動不掃描來源：
+每次啟動 Codex／Claude 前，Launcher 自動取得**實際執行環境**使用者的 global 設定、skills、plugins 與對話。本機使用本機使用者的 `~/.codex`／`~/.claude`；SSH 使用遠端登入使用者的資料，不把本機資料搬到遠端。登入憑證仍保留在各帳號的 `CODEX_HOME`／`CLAUDE_CONFIG_DIR`，不共用 `auth.json`、`.credentials.json` 或 provider 的 API key。
 
-| 工具 | 會共用 | 絕不複製 |
-|---|---|---|
-| Claude | `skills/`、`agents/`、`commands/`、`hooks/`、`output-styles/`、最上層 `*.md`（CLAUDE.md 及其 `@` 引用檔）、`settings.json` 的 `model`/`hooks`/`permissions`/`statusLine`/`theme`/`effortLevel`/`env`（已濾掉憑證與路由）；匯入時記錄已啟用外掛路徑，啟動以 `--plugin-dir` 使用該副本清單 | `.credentials.json`、`apiKeyHelper`、`ANTHROPIC_*` / `CLAUDE_CODE_USE_*` / `*TOKEN*` / `*KEY*`；對話需另行明確匯入 |
-| Codex | `skills/`、`prompts/`、`agents/`、`rules/`、`AGENTS.md`、`hooks.json`、`config.toml` 中的 `mcp_servers`/`features`/`hooks`/`plugins`/`tui` 等 | `auth.json`、`model_provider`、`model_providers`、`forced_login_method`、專案信任清單 |
+| 工具 | Global 資料與對話 | 專案局部來源 |
+| --- | --- | --- |
+| Claude | 自動更新 `skills/`、`agents/`、`commands/`、`hooks/`、`output-styles/`、最上層 Markdown 及白名單設定；每次從使用者 plugin registry 取得可用外掛，遵循 user／project／local 範圍與目前的 `enabledPlugins`；自動補齊 `projects/` 中的對話 | 從啟動專案與父目錄讀取 `.claude/`、`CLAUDE.md`、`.mcp.json`；Launcher 決定要帶入哪些 plugins 時只看專案資料夾本身的 `.claude/settings*.json`（不看上層目錄，避免他人在 `C:\`、`/tmp` 等處放的設定影響你），局部停用設定優先 |
+| Codex | 自動更新 `~/.codex` 內的擴充與白名單設定（含 plugins）；若存在 `state_*.sqlite`，透過 `sqlite_home` 使用原生對話索引，支援 paginated 對話；沒有原生索引時自動補齊檔案型 `sessions/` | CLI 正常讀取 `$HOME/.agents/skills`、repo 的 `.agents/skills`、`AGENTS.md` 與受信任的 `.codex/config.toml` |
 
-- 只複製，不建立連結（資料資料夾禁止 symlink）。再次匯入只更新仍等於上次副本的項目；個人修改、個人刪除及來源已移除的內容都保留，不覆寫既有個人檔案。
-- SSH 遠端是同樣邏輯：明確匯入的是**遠端主機**上的 `~/.claude` / `~/.codex`，不是本機的。
-- 專案層級的 `.claude/`、`CLAUDE.md`、`.mcp.json`、`AGENTS.md` 一直都能正常使用，不受影響。
-- 多 agent 的功能旗標請寫在 Claude `settings.json` 的 `env`（例如 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`）或 Codex `config.toml` 的 `[features]`，它們會跟著共用；行程環境變數中的 `CLAUDE_*` / `CODEX_*` 仍會被清除，避免把另一個帳號的路由帶進來。
-- 若有 `mcp_servers` 內含金鑰，設定匯入會一併複製到帳號資料夾（僅限你本人可讀）；請在匯入前檢查來源，設定匯出不包含 profile 內容。
+為保留多帳號登入隔離，需要 profile 內副本的資料會自動更新，不必先手動匯入。Launcher 不修改原始 global 設定或建立 symlink；Codex 本身使用共享原生 SQLite 索引時，會照官方 CLI 的正常行為更新對話狀態。跨帳號共用對話不代表共用登入憑證。[Codex skills](https://learn.chatgpt.com/docs/build-skills)／[Codex state 與設定](https://learn.chatgpt.com/docs/config-file/config-reference)／[Claude 設定來源](https://code.claude.com/docs/en/settings)。
 
-### 保留 CLI 個人設定與匯入對話
+### 啟動時的容錯
 
-- Claude 的個人設定若在帳號 profile 中調整或刪除，再次匯入也會保留；沒有改過的設定可按需更新。Codex 一旦修改 profile 的 `config.toml`，就保留整份檔案；舊 profile 無法判定是否修改過時，同樣保留。來源移除的設定不自動刪除。帳號表單明確指定的模型仍優先。
-- 在帳號頁明確執行「匯入對話」。來源是該執行環境的 `~/.codex` 或 `~/.claude`，不是跨主機搬移，也不讀取 ChatGPT／Claude 網頁聊天。舊自動同步／history 偏好遷移為手動並提示一次，既有 profile 與對話保持原樣。
-- 匯入只新增不存在的對話檔，不覆寫 profile 已有對話、不回寫來源、不搬移登入憑證。來源可能包含多個專案或帳號曾用過的對話；只在要接收這些內容的帳號執行。之後有新紀錄時，再明確匯入。
-- **專案對話跨帳號共用**：帳號編輯裡勾選「與同工具的其他帳號共用各專案的對話紀錄」後，開啟該帳號的專案終端前，會把同一環境、同工具其他帳號 profile 裡「屬於這個專案」的對話檔複製過來（Codex 以 rollout 第一行記錄的工作目錄比對，Claude 以 `projects/` 下的專案資料夾比對）；只新增不存在的檔案，不覆寫、不碰憑證、設定與輸入歷史。已經開著的終端，其他帳號之後才產生的對話可按終端標題列的更新鈕（或再開新終端）重新同步，接著在終端內用 `/resume` 選用；寫入中或未完整的檔案本次略過，下次更新再補。
-- 支援 Codex `sessions/` 的檔案型 rollout 與 Claude `projects/` 的對話 JSONL；資料庫型 Codex 對話不在此匯入範圍。終端會顯示匯入／略過結果。匯入是副本，來源後續新增的訊息不會覆蓋已匯入對話；上下鍵的輸入歷史也不會合併。
-- 匯入後在原專案的官方 CLI 使用 `/resume` 選擇對話；其他專案的紀錄可能被 CLI 的專案篩選隱藏。封存、壓縮、未完整寫入或超過 64 MiB 的檔案不匯入，每次最多複製 256 MiB、掃描 10,000 個項目。[Codex 對話儲存實作](https://github.com/openai/codex/blob/main/codex-rs/rollout/src/recorder.rs)／[Claude 對話文件](https://code.claude.com/docs/en/sessions)。
+- 自動更新是盡力而為：任何一個檔案（或整段設定）無法安全讀寫時只略過它，終端會提示「部分使用者資料無法更新」，Codex／Claude 仍照常啟動。
+- profile 內若有 symlink 或 junction（例如手動把 `skills`、`CLAUDE.md` 連到 `~/.claude`），Launcher 不會透過連結讀寫或刪除任何東西，終端會列出這些連結；刪除連結本身（不是連結的目標）後，下次啟動會改為複製實體檔。
+- 使用者自己的 `settings.json`、`config.toml`、plugin registry 可以有 UTF-8 BOM 或一般的 0644 權限（常見於 SSH 主機）。
+- 只重讀有變動的檔案：擴充比對大小與修改時間，對話比對大小與修改時間；第一次複製大量 plugins 可能需要十幾秒，之後每次啟動通常約 1–2 秒。
+
+### 更新與舊副本清理
+
+- 只有仍等於上次 Launcher 副本的擴充與設定才會自動更新；使用者自行新增、修改或刪除的 profile 內容會保留。Codex 的 `config.toml` 一旦被使用者修改，就保留整份檔案。
+- 原始來源移除的擴充，只有存在於舊匯入清單且 hash 仍吻合的副本才會刪除；沒有來源或無法確認是否修改過的檔案不會擅自清理。登入憑證不在清理範圍內。
+- Claude／檔案型 Codex 對話自動新增；若來源只在相同內容後新增訊息，會補齊副本。若 profile 已有不同的續寫或修改，會保留。未完整寫入、超過 64 MiB 或無法安全讀取的檔案略過；每次最多複製 256 MiB、掃描 10,000 個項目，有略過或超過上限會在終端提示。
+- 對話可在官方 CLI 的 `/resume` 選用；其預設專案篩選可能隱藏其他專案。這不是 ChatGPT／Claude 網頁對話匯入，也不合併上下鍵的 prompt 輸入歷史。
+- 帳號頁的手動匯入入口仍可用於立即更新資料；終端標題列更新鈕會取得該環境原生及其他 Launcher profiles 的專案對話。跨 Launcher 帳號自動取得某個專案的對話仍由 `share_project_history` 控制。
 
 ## 帳號、專案與路徑
-
-### 終端流量控制與同機效能量測
-
-ConPTY 到 Qt、Chromium、xterm 的未確認原始輸出共同限制為每端 256 KiB。xterm 完成寫入才釋放額度；消費者變慢會使來源等待，不截斷 UTF-8 或控制序列。關閉終端解除等待並終止本機工作；正常輸出停止後會繼續排空。
-
-終端預設使用 xterm.js 的 DOM 渲染器：WebGL 渲染器在 Qt WebEngine（Windows）中重繪時可能出現斜角黑塊閃爍。若要比較或改回 WebGL，啟動前設定環境變數 `VIBE_TERMINAL_WEBGL=1`。
-
-使用 `scripts/benchmark_workspace.py` 分別量測 0／4／8 個合成終端。腳本記錄行程樹 CPU、RAM、切頁到 JavaScript 回應的延遲、各端積壓／峰值及排空時間，並用 `widget.grab()` 保存視窗截圖；不讀取帳號或專案資料。
-
-```powershell
-.venv/Scripts/python.exe scripts/benchmark_workspace.py --terminals 0 --duration 60 --output .benchmark/control-0.json
-.venv/Scripts/python.exe scripts/benchmark_workspace.py --terminals 4 --duration 60 --output .benchmark/control-4.json
-.venv/Scripts/python.exe scripts/benchmark_workspace.py --terminals 8 --duration 1800 --output .benchmark/stress-8.json
-```
-
-同機比較須採相同 duration、輸出速率與 renderer 模式；CPU 百分比以一核心為 100%，RAM 包含 WebEngine／ConPTY 子程序。`--offscreen --software` 可用於離屏軟體繪圖，但結果不代表正常桌面 GPU 效能。沙箱若阻止 renderer 啟動，30 秒後標記 `startup_unavailable`；未成功啟動或未排空不能算驗收通過。切頁量測是 UI 與 renderer 回應時間，並非 GPU 畫面呈現完成時間。
 
 - **訂閱帳號綁定一個環境。** Codex／Claude 的訂閱登入是存在「做登入的那台機器」上的，Launcher 不會把登入權杖搬到別台（那等於把憑證複製出去）。所以每個訂閱帳號要選一個「登入環境」，只登入一次，之後在該環境的所有專案都直接可用；要在另一台主機用，就為那台再建一個帳號。**API／Endpoint 帳號不綁定**，哪個環境都能用。
 - **專案不綁帳號。** 專案只有名稱、資料夾與環境。開啟專案時會跳出「用哪個帳號」的選單（只列出能在該環境使用的帳號，Codex 與 Claude 分開標示、顯示是否已登入）；只有一個可用帳號時直接開。勾「下次直接使用這個帳號」可略過詢問（之後可在專案設定重新打開）。「SSH」終端完全不需要帳號。
@@ -240,7 +268,7 @@ ConPTY 到 Qt、Chromium、xterm 的未確認原始輸出共同限制為每端 2
 
 - 「工作區」頁的專案卡片不再有「在其他環境開啟」；終端的「同專案改開其他終端」只會列這個環境的 Codex／Claude／SSH 終端。
 - 服務層也會拒絕「專案 + 其他環境」的啟動請求。要換主機，到「專案」頁編輯專案。
-- 舊版在其他環境開過的工作階段不會被召回或重開；舊的工作區存檔裡指向其他環境的項目，會改開在專案自己的環境並重新選帳號。
+- 在其他環境開過的工作階段不會被召回或重開；工作區存檔裡指向其他環境的項目，會改開在專案自己的環境並重新選帳號。
 
 ## 遠端專案路徑：瀏覽主機上的資料夾
 
@@ -258,6 +286,7 @@ ConPTY 到 Qt、Chromium、xterm 的未確認原始輸出共同限制為每端 2
 - 按「儲存」才生效；「取消」不會變更任何東西。「使用預設」回到資料夾圖示。
 - 選擇的檔案會檢查能否讀取，再以隨機檔名複製到資料目錄的 `project-icons/`；換圖或刪除專案時會一併刪除舊檔。SVG 由 Qt SVG 繪製，不會載入外部資源或執行腳本。
 - 設定存在 `ui-state.json` 的 `project_icons`（與釘選環境一樣屬於檢視偏好，不寫入專案資料、不隨設定匯出）。
+- 工作區使用同一個對話框（多一個名稱欄位，預設圖示是公事包），圖示存在 `workspace_icons`；刪除工作區時一併刪除它的圖片。
 
 ## 配色與圖示
 
@@ -270,37 +299,40 @@ ConPTY 到 Qt、Chromium、xterm 的未確認原始輸出共同限制為每端 2
 - 服務各有固定顏色：Codex 藍、Claude 橘（品牌色）、終端機綠（取自主題的 ANSI 綠）、GitHub 灰；帳號頁群組標題與工作區「快速開啟」按鈕都用這組顏色。
 - 專案頁的「工作區」是一般段落（標題、摘要、卡片，右側 `+` 再開一個），卡片和下方基本資料同樣是凹陷底；工作區頁左側的專案卡片按鈕會換行，沒有終端時終端清單收成一行提示。
 
-## 專案的工作區抽屜
+## 專案的工作階段抽屜
 
-同一個專案可以同時開很多個工作區（Codex、Claude、SSH 終端，不同帳號各一個）。專案頁選取專案後，右側標題下方的「工作區」抽屜會列出它**每一個**工作區：
+同一個專案可以同時開很多個工作階段（Codex、Claude、SSH 終端，不同帳號各一個）。專案頁選取專案後，右側標題下方的「工作階段」抽屜會列出它**每一個**工作階段：
 
 - 每列顯示服務與帳號、環境、更新時間，以及各自的狀態。
-- 已在「工作區」頁開著的，按「切換」直接跳過去；SSH 上仍在背景執行的，按「接回」。
+- 已在某個工作區開著的，依所在工作區分組顯示，按「切換」直接跳過去（會一併切換工作區）；SSH 上仍在背景執行的，按「接回」。
 - 每列可單獨停止、移除紀錄；「再開一個」會再開啟這個專案（可選別的帳號）。
-- 專案清單的狀態標籤在有多個進行中的工作區時會寫成「運行中 ×2」。
+- 專案清單的狀態標籤在有多個進行中的工作階段時會寫成「運行中 ×2」。
 - 抽屜可以收合；已結束的排在後面。
 
-### 召回：接回還在跑的、重開已停止的
+### 還原：回到工作區、接回還在跑的、重開已停止的
 
-- 已停止（結束、失敗）的工作區，抽屜那一列有「重新開啟」：用原本的服務、帳號、環境再開一次，舊的已停止紀錄會被新的取代。
-- 抽屜上的「召回全部（N）」，以及專案頁的「接回工作」按鈕，一次處理這個專案的所有工作區：
+- 專案在某個工作區裡時，專案頁的「重新連線工作」、首頁的「恢復」會先回到那個工作區：終端開著就直接切過去；在待恢復清單裡就帶回該工作區的終端；只剩「已結束」的終端就在原位置重新啟動。以下流程只在專案不屬於任何工作區時使用。
+- 已停止（結束、失敗）的工作階段，抽屜那一列有「重新開啟」：用原本的服務、帳號、環境再開一次並接續上次對話，舊的已停止紀錄會被新的取代（本機的已結束紀錄會自動清除，所以通常只有 SSH 的會出現）。
+- 抽屜上的「還原全部（N）」，以及專案頁的「重新連線工作」按鈕，一次處理這個專案的所有工作階段：
   - 還在 SSH／tmux 上執行的：接回。
   - 已停止的：重新開啟。同一組（服務與帳號、模式、環境）只重開最新的一筆；那一組若已經開著或正在連線就跳過。
   - 帳號已被刪除、或登入不在該環境的，會略過。
   - 超過一個時會先列出清單讓你確認；SSH 的每個終端可能各自需要驗證。
-- 在「工作區」頁：左側「快速開啟」的專案卡片在有可召回的工作區時會出現「召回 N」按鈕；終端清單的專案標題與終端的右鍵選單、卡片的「⋯」選單也有「召回全部工作區」。
+- 在「工作區」頁：左側「快速開啟」的專案卡片在有可還原的工作階段時會出現「還原 N」按鈕；終端清單的專案標題與終端的右鍵選單、卡片的「⋯」選單也有「還原全部工作階段」。
 
 ## 工作階段整理
 
 - **為什麼會有「狀態不明」**：直接關掉終端視窗時，App 無法確認遠端工作是否還在跑。**本機**的工作離開終端就必然結束，所以現在直接標為「已結束」，不再算不明；只有 SSH（tmux）的才可能不明。
+- **專案的「執行中」= 工作區開著的終端**：專案清單、首頁與抽屜的狀態以工作區實際開著的終端為準；SSH 上仍在 tmux 執行但這裡沒開終端的顯示「背景執行」。本機已停止或失敗的工作階段不保留紀錄（要重開的內容由工作區記得）；「恢復」會回到專案所在的工作區。
+- **本機終端不會「存活」**：本機沒有 tmux，關分頁、關 Launcher、當機或重開機都會結束其中的工作。Launcher 關閉時直接記為已結束；當機或重開機留下的紀錄，在下次啟動時校正（首頁、專案與工作區頁一起更新）。判斷時除了 PID 也比對行程的建立時間，Windows 重複使用同一個 PID 時不會誤判為仍在執行。
 - **工作階段頁**頂端會統計各狀態的數量，並提供「檢查狀態不明的」（本機的直接結案；SSH 的每個主機只開一個終端重新確認）與「清除已結束的」。
-- **依專案分組**（預設，可在工具列切換「依時間」，選擇會記住）：每個專案一組，標題列出環境與「進行中／不明／已結束」數量。有進行中工作的組排最前，其次是狀態不明的，只剩已結束工作的組預設收合（篩選「已結束」時會展開）。組標題可「全部召回」（接回仍在跑的、重開已停止的）或「清除已結束」（只清這個專案的）。專案已刪除的工作放在「其他工作」組。
+- **依專案分組**（預設，可在工具列切換「依時間」，選擇會記住）：每個專案一組，標題列出環境與「進行中／不明／已結束」數量。有進行中工作的組排最前，其次是狀態不明的，只剩已結束工作的組預設收合（篩選「已結束」時會展開）。組標題可「全部還原」（接回仍在跑的、重開已停止的）或「清除已結束」（只清這個專案的）。專案已刪除的工作放在「其他工作」組。
 - **可複選**（Ctrl／Shift）：一次停止（同一個環境只開一次連線，全部處理完）或一次移除紀錄。
 - **開啟時提醒**：啟動 App 時若上次留下仍在進行或狀態不明的工作，會提示數量；已結束／失敗的紀錄只保留最新 20 筆，其餘自動清掉。
 
 ## 工作區：選帳號
 
-「快速開啟」每個專案的 Codex／Claude 都是分裂按鈕：**點名稱**用預設帳號開（上次用的或第一個可用的），**點旁邊的 ▾** 選擇要用哪個帳號（只列出能在該環境使用的）。「⋯」改為「在其他環境開啟」。
+「快速開啟」每個專案的 Codex／Claude 都是分裂按鈕：**點名稱**用預設帳號開（上次用的或第一個可用的），**點旁邊的 ▾** 選擇要用哪個帳號（只列出能在該環境使用的）。專案只在綁定的環境開啟（見「專案只在它綁定的環境開啟」）。
 
 ## 帳號配額
 
@@ -336,14 +368,14 @@ Snap 更新會在 terminal 顯示發布者及頻道，輸入 yes 後才執行 `s
 用安裝程式裝好的版本（`Vibe-Launcher-Setup-<版本>.exe`，只裝給目前使用者）沒有 git checkout，改從 GitHub Releases 更新：
 
 - 檢查：啟動後與之後每六小時最多一次，只送出一個很小的 HTTPS 請求（`update_check` 可關閉）；結果與版本說明格式和 git 版相同。Release 要同時有 `Vibe-Launcher-Setup-<版本>.exe` 與 `SHA256SUMS.txt` 才會被列為可更新（上傳完成前不會被看到）。
-- 更新：按下更新後依序是 查詢 → 備份資料 → 顯示會被移除／變更的設定 → 下載（分段寫入磁碟，不佔記憶體）→ 核對 SHA-256（不符就不執行，也不留下檔案）→ 靜默啟動安裝程式。安裝程式會關閉 Launcher、換檔、再自動開啟新版；仍在執行的本機終端會結束，以 tmux 保留的 SSH 工作不受影響。
+- 更新：按下更新後依序是 查詢 → 備份資料 → 下載（分段寫入磁碟，不佔記憶體）→ 核對 SHA-256（不符就不執行，也不留下檔案）→ 靜默啟動安裝程式。安裝程式會關閉 Launcher、換檔、再自動開啟新版；仍在執行的本機終端會結束，以 tmux 保留的 SSH 工作不受影響。
 - 資料在 `%LOCALAPPDATA%\VibeLauncher`，不在安裝資料夾，安裝、更新、解除安裝都不會動它。更新來源是公開的 GitHub Releases（`updates.RELEASE_REPO`）；目前沒有程式碼簽章，Windows SmartScreen 可能顯示警告。
 - 這個版本只需要有 Windows 內建的元件；`codex` / `claude`、tmux、OpenSSH 等仍照原本的需求另外安裝。
 - 資源：打包是資料夾版（不是單一 exe，避免每次啟動解壓縮），沒有常駐服務或系統匣程式；介面本身閒置時約 95 MB 記憶體（尚未開終端），開啟內建終端後 Qt WebEngine 會另外使用記憶體。
 
 打包與發佈流程（給維護者）：`packaging/build.ps1` 產生 `dist-app\Vibe Launcher\` 並自我檢查（`vibe-launcher-cli --selftest`），裝有 Inno Setup 6 時再產生安裝程式與 `SHA256SUMS.txt`；推送 `vX.Y.Z` tag 會由 `.github/workflows/release.yml` 執行測試、打包並建立 Release。細節與注意事項寫在 `AGENTS.md` 的「Packaging, updates and licence」。
 
-更新只會「新增」設定，不改寫既有設定：新版本寫入的欄位，舊版本讀寫時原樣保留；舊版本不認得的值也不會被改回預設。若某版本移除或改變設定，會在 `CHANGELOG.md` 的 `### 設定變更` 列出，更新前顯示清單提醒。資料庫遷移前會先備份到 `backups\db-before-v<N>-<時間>.sqlite3`；較新版本建立的資料庫在舊版本中只能讀取。
+目前仍在開發階段，不保留舊版相容：不做資料庫遷移，也不保留舊欄位或舊檔案格式。資料庫裡這個版本不認得的欄位在下次儲存時移除；`ui-state.json`、`settings.json` 中無法使用的值改回預設。更新前仍會備份資料庫與這兩個設定檔，需要時可從 `backups\` 取回。
 
 ## 帳號與憑證
 
@@ -356,13 +388,13 @@ Snap 更新會在 terminal 顯示發布者及頻道，輸入 yes 後才執行 `s
 - 子程序會清除繼承的 Codex／Claude／OpenAI／Anthropic 路由變數。Claude 設定檔若另有 provider 或 auth override，會停止並提示修正，不會刪除你的設定。
 - Codex 啟動前檢查 `--help`；支援時加入 `--no-daemon`，舊版不傳入不支援的選項。Snap 安裝保留 `/snap/bin/codex` 的指令名稱，不展開成 `/usr/bin/snap`。
 - 自訂 Codex endpoint 必須支援 Responses API，Claude endpoint 必須支援 Anthropic 協定；本工具不轉換 API 協定。
-- API endpoint 要求 HTTPS；HTTP 僅允許明確勾選的 loopback。變更 endpoint 後必須重新輸入 API key，改回舊網址也不會復用原 key。舊版未綁定 endpoint 的 key 第一次使用時也需重新輸入。
+- API endpoint 要求 HTTPS；HTTP 僅允許明確勾選的 loopback。變更 endpoint 後必須重新輸入 API key，改回舊網址也不會復用原 key。
 
 ## 資料位置與狀態
 
 本機資料：`%LOCALAPPDATA%\VibeLauncher`。可用 `VIBE_LAUNCHER_HOME` 改成其他專用資料夾。遠端資料：`~/.local/share/vibe-launcher`。
 
-SQLite 保存帳號標籤、環境、收藏、狀態及時間；版本 2 匯出包含 AI／GitHub 帳號、環境、專案與工作區的非機密設定，仍接受版本 1 匯入。登入狀態、憑證位置、repository credential helper 與 Web 服務程序資訊不匯出；匯入後重新檢查登入及 repository 綁定。匯入依 ID 合併，驗證失敗整批取消。不要在名稱、URL 或路徑填入秘密。
+SQLite 保存帳號標籤、環境、收藏、狀態及時間；版本 2 匯出包含 AI／GitHub 帳號、環境、專案與工作區的非機密設定，只接受版本 2 匯入。登入狀態、憑證位置、repository credential helper 與 Web 服務程序資訊不匯出；匯入後重新檢查登入及 repository 綁定。匯入依 ID 合併，驗證失敗整批取消。不要在名稱、URL 或路徑填入秘密。
 
 SSH helper 是此專案的標準庫 Python 模組，每次連線以 SHA-256 命名部署，與已執行工作的版本分離。不使用 SCP，因此一次操作只需一次 SSH 驗證。tmux 使用獨立 socket `vibe-launcher`，不干擾其他 tmux 工作。
 
@@ -380,16 +412,32 @@ GUI 定時讀取本機狀態；遠端 CLI 的 terminal 輸出不作為狀態證�
 ## 測試
 
 ```powershell
-uv run --group dev pytest -q -o cache_dir=.local-test/pytest-cache
+$env:QT_QPA_PLATFORM = "offscreen"
+uv run --group dev pytest -q --basetemp="$env:TEMP/vibe-launcher-tests" -p no:cacheprovider -o faulthandler_timeout=90
 ```
+
+`--basetemp` 指到專案外的暫存資料夾，避免預設的 `%TEMP%\pytest-of-<使用者>` 無法存取，也避免 Git 相關測試找到 Launcher 自己的 repository。
 
 測試使用模擬 CLI／SSH 回應與隔離資料夾，不會使用你的真實訂閱或 API key。真實 SSH key／OTP、兩個訂閱帳號的瀏覽器登入，以及付費 API 請依 [人工驗收清單](acceptance.md) 驗證。
 
 ### 開發流程
 
-1. 從 `main` 開分支（`feat/…`、`fix/…`），改完在本機跑上面的測試。
-2. 推上 GitHub 開 PR；CI 會在 Windows 上以離屏 Qt 跑完整測試，PR 範本列出要勾的檢查。
-3. CI 通過後合併到 `main`。Dependabot 每月提醒更新 GitHub Actions 與 Python 套件。
+分支規則採 Git Flow（不使用 release 分支）搭配 GitHub PR：
+
+| 分支 | 用途 | 從哪裡分出 | 合併到 | 推上 GitHub |
+| --- | --- | --- | --- | --- |
+| `main` | 正式版；合併後打 `vX.Y.Z` tag 發布 | — | — | 是 |
+| `develop` | 測試版：完成的新功能先併到這裡測試 | `main` | `main`（PR） | 是 |
+| `hotfix` | 已發布版本修正的測試版 | `main` | `main`（PR），再併回 `develop` | 是 |
+| `feat/dev_<模組>_<功能>` | 新功能、既有功能擴充、文件或重構，例如 `feat/dev_workspace_restore` | `develop` | `develop`（本機合併） | **否** |
+| `fix_<模組>_<功能>[N]` | 修正已發布版本，例如 `fix_runtime_sync1` | `hotfix` | `hotfix`（本機合併） | **否** |
+
+1. 新功能：`git switch develop`、`git pull --ff-only`，再 `git switch -c feat/dev_<模組>_<功能>`。完成後在本機跑完整測試，`git switch develop`、`git merge --no-ff feat/dev_…`，再跑一次測試，`git push origin develop`，最後 `git branch -d` 刪除功能分支。
+2. 修正正式版：沒有 `hotfix` 時先 `git switch -c hotfix origin/main`；從 `hotfix` 開 `fix_<模組>_<功能>N`，修好後同樣本機合併回 `hotfix`、測試、`git push origin hotfix`、刪除 fix 分支。
+3. 發布：在 `develop`（或 `hotfix`）更新 `pyproject.toml` 的 `version` 與 `CHANGELOG.md`，開 PR 到 `main`；CI 在 Windows 上以離屏 Qt 跑完整測試，通過後合併並在 `main` 打 `vX.Y.Z` tag，由 release workflow 打包發布。
+4. 合併後：把 `main` 併回 `develop`；`hotfix` 合併後刪除（本機與 GitHub），下次修正時再從 `main` 重新建立。
+
+`feat/dev_*` 與 `fix_*` 只留在本機；`.githooks/pre-push` 會拒絕推送 `main`、`develop`、`hotfix` 與 `vX.Y.Z` tag 以外的分支，每個 clone 執行一次 `git config core.hooksPath .githooks` 啟用。CI 只在推送這三個分支與 PR 到 `main` 時執行。Dependabot 自動版本更新 PR 已停用（`open-pull-requests-limit: 0`），套件升級由維護者主動安排。
 
 協作規則（不進版控的檔案、命名、範例只用通用值）寫在 [AGENTS.md](../AGENTS.md)，給人和 coding agent 共用。
 
@@ -417,7 +465,7 @@ GitHub 檢查、讀取等背景操作在工作區終端以帳號名稱標示；�
 
 ## 生產環境驗證
 
-資料庫格式與手動匯入偏好遷移已在既有資料庫備份副本驗證；保留原紀錄，通過 SQLite integrity／foreign key 檢查及重複遷移檢查。狀態資料未改變時不重繪清單；更新失敗保留上次資料並在狀態列提示，限頻診斷只記錄操作名稱與例外類型，最多保留三個 64 KiB 檔案，不收集終端全文。
+狀態資料未改變時不重繪清單；更新失敗保留上次資料並在狀態列提示，限頻診斷只記錄操作名稱與例外類型，最多保留三個 64 KiB 檔案，不收集終端全文。
 
 同機合成量測使用 `scripts/benchmark_workspace.py`。8 終端已完成 30 分鐘持續輸出，每端待送與待確認資料合計上限 256 KiB，結束後全部排空。這是離屏軟體繪圖測試，不能代表可見桌面 GPU 效能，也沒有修改前的同條件基線，因此不宣稱 CPU 或 RAM 已降低。真實 OAuth、SSH、兩個 GitHub 帳號存取及 Harness 官方續聊仍須在指定測試環境驗收。
 

@@ -72,13 +72,6 @@ def test_settings_keep_hooks_but_drop_routing_and_secrets(tmp_path, home):
     runtime.check_settings(CLAUDE, root, tmp_path)
 
 
-def test_opting_out_copies_nothing(tmp_path, home):
-    root = tmp_path / "data"
-    summary = runtime.sync_extensions(dict(CLAUDE, share_extensions=False), root, home)
-    assert summary == {"copied": 0, "removed": 0, "settings": []}
-    assert not runtime.profile_dir(root, CLAUDE).exists()
-
-
 def test_resync_follows_the_source_but_spares_the_profiles_own_files(tmp_path, home):
     root = tmp_path / "data"
     runtime.sync_extensions(CLAUDE, root, home)
@@ -130,25 +123,6 @@ def test_claude_personal_settings_and_deletions_survive_resync(tmp_path, home):
         assert actual["theme"] == "light"
         assert actual["env"]["TEAM_FLAG"] == "personal"
         assert actual["env"]["NEW_FLAG"] == "yes"
-
-
-@pytest.mark.parametrize("tool", ["claude", "codex"])
-def test_legacy_manifest_preserves_existing_personal_settings(tmp_path, home, tool):
-    account = CLAUDE if tool == "claude" else CODEX
-    root = tmp_path / "data"
-    profile = runtime.profile_dir(root, account)
-    _write(profile / runtime.SHARE_MANIFEST, json.dumps({"files": [], "settings": ["model"], "env": []}))
-    if tool == "claude":
-        path = profile / "settings.json"
-        _write(path, json.dumps({"model": "mine"}))
-    else:
-        path = profile / "config.toml"
-        _write(path, '# personal comment\nmodel = "mine"\n')
-        _write(home / ".codex" / "config.toml", 'model = "source"\n')
-    runtime.sync_extensions(account, root, home)
-    assert '"mine"' in path.read_text(encoding="utf-8")
-    if tool == "codex":
-        assert path.read_text(encoding="utf-8").startswith("# personal comment")
 
 
 def test_codex_follows_source_until_personally_edited(tmp_path):
@@ -245,17 +219,7 @@ def test_enabled_user_plugins_are_passed_by_path(tmp_path):
         "elsewhere@m": [{"scope": "user", "installPath": str(tmp_path)}]}}))
     _write(home / ".claude" / "settings.json", json.dumps({"enabledPlugins": {"off@m": False}}))
     assert runtime.user_plugin_dirs(CLAUDE, home) == [str(on)]
-    assert runtime.user_plugin_dirs(dict(CLAUDE, share_extensions=False), home) == []
     assert runtime.user_plugin_dirs(CODEX, home) == []
-
-
-def test_sharing_defaults_manual_and_the_flag_is_validated(tmp_path):
-    from vibe_launcher.store import Store
-    store = Store(tmp_path / "s.sqlite3")
-    store.save("accounts", {"id": "a", "name": "A", "tool": "claude", "auth": "subscription"})
-    assert store.list("accounts")[0]["share_extensions"] is False
-    with pytest.raises(ValueError):
-        store.save("accounts", {"id": "b", "name": "B", "tool": "claude", "auth": "subscription", "share_extensions": "yes"})
 
 
 def test_explicit_import_preserves_personal_extension_edits_and_deletions(tmp_path, home):
@@ -280,19 +244,17 @@ def test_first_import_does_not_overwrite_existing_profile_extensions(tmp_path, h
     assert skill.read_text(encoding="utf-8") == "existing"
 
 
-def test_launch_uses_plugin_snapshot_without_source_registry_scan(tmp_path, monkeypatch):
+def test_launch_discovers_current_plugins_without_an_import_snapshot(tmp_path, monkeypatch):
     root, home = tmp_path / "data", tmp_path / "home"
     plugin = home / ".claude" / "plugins" / "cache" / "test"
     _write(plugin / "plugin.json", "{}")
     _write(home / ".claude" / "plugins" / "installed_plugins.json",
            json.dumps({"plugins": {"test@m": [{"installPath": str(plugin)}]}}))
     _write(home / ".claude" / "settings.json", "{}")
-    runtime.manual_import(CLAUDE, root, "settings", home)
-    def forbidden(*args):
-        raise AssertionError("launch scans the source registry")
-    monkeypatch.setattr(runtime, "user_plugin_dirs", forbidden)
-    monkeypatch.setattr(runtime, "user_config_dir", forbidden)
+    monkeypatch.setattr(runtime, "user_config_dir", lambda *args: home / ".claude")
     assert runtime.build_cli(CLAUDE, "launch", root) == ["claude", "--plugin-dir", str(plugin)]
+    _write(home / ".claude/settings.json", '{"enabledPlugins": {"test@m": false}}')
+    assert runtime.build_cli(CLAUDE, "launch", root) == ["claude"]
 
 
 def test_import_rejects_unknown_kind_or_tool(tmp_path):
@@ -327,3 +289,15 @@ def test_invalid_source_settings_report_failure_without_replacing_profile(tmp_pa
     with pytest.raises(ValueError, match="source"):
         runtime.manual_import(account, root, "settings", home)
     assert target.read_text(encoding="utf-8") == "personal content"
+
+
+def test_a_launch_refresh_copies_what_fits_and_removes_nothing(tmp_path, home, monkeypatch):
+    root = tmp_path / "data"
+    runtime.sync_extensions(CLAUDE, root, home, follow_source=True)
+    monkeypatch.setattr(runtime, "SHARE_MAX_FILES", 2)
+    summary = runtime.sync_extensions(CLAUDE, root, home, follow_source=True)
+    profile = runtime.profile_dir(root, CLAUDE)
+    assert summary["limited"] and summary["removed"] == 0
+    assert (profile / "commands" / "ship.md").is_file() and (profile / "hooks" / "gate.cmd").is_file()
+    with pytest.raises(ValueError, match="Too many"):
+        runtime.manual_import(CLAUDE, root, "settings", home)

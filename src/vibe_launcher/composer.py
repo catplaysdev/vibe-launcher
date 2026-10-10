@@ -61,6 +61,7 @@ class ComposerEdit(QPlainTextEdit):
         self.history: list[str] = []
         self._recall = 0                       # 0 = not browsing; n = n-th most recent entry
         self._draft = ""
+        self.confirm = None                    # optional check before sending: (text) -> bool
         self.document().contentsChanged.connect(self._fit)
         self._fit()
 
@@ -86,6 +87,8 @@ class ComposerEdit(QPlainTextEdit):
             self.clear()
             self.raw.emit(b"\r")
             return
+        if self.confirm is not None and not self.confirm(text):
+            return                       # not sent: the text stays for editing
         if not self.history or self.history[-1] != text:
             self.history.append(text)
             del self.history[:-HISTORY]

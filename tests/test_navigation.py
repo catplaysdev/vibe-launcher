@@ -37,6 +37,9 @@ class Workspace:
     def tabs(self):
         return list(self._tabs)
 
+    def current_tabs(self):
+        return self.tabs()
+
     def select(self, tab_id, focus=True):
         self.selected = tab_id
 
