@@ -28,6 +28,7 @@
 - 分支規則改為 Git Flow（main 正式版、develop 與 hotfix 測試版、`feat/dev_*`／`fix_*` 只留在本機），新增 `.githooks/pre-push` 阻擋推送工作分支，CI 改為在 main／develop／hotfix 推送與 PR 到 main 時執行。
 - 終端標題列新增「重新載入」；重新載入與輸入列按 Enter 送出前會確認，可勾選「不再詢問」，並可在「設定 → 終端 → 確認通知」改回。
 - 新增介面設定：`workspace_icons`、`default_workspace_name`、`default_workspace`、`last_workspace`、`confirm_reload`、`confirm_send`（`ui-state.json`）。
+- 修正：在某個環境檢查 Codex／Claude 版本找到新版後，其他環境仍顯示舊的檢查結果；現在各環境都會以任何一次檢查看到的最新版比較，落後的直接標示「可更新」。
 
 ## [0.1.0] - 2026-10-06
 
