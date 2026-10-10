@@ -13,8 +13,8 @@ pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is not 
 
 CHANGES = {
     "0.1.0": "- First release.\n",
-    "0.2.0": "- Faster terminals.\n### 設定變更\n- 變更: terminal_font_size（預設改為 13）\n",
-    "0.3.0": "- New sidebar.\n### 設定變更\n- 移除: workspace_layout\n",
+    "0.2.0": "- Faster terminals.\n",
+    "0.3.0": "- New sidebar.\n### Details\n- Wider cards.\n",
 }
 
 
@@ -26,7 +26,7 @@ def git(cwd: Path, *args: str) -> str:
 
 def changelog(upto: str) -> str:
     versions = [v for v in CHANGES if tuple(map(int, v.split("."))) <= tuple(map(int, upto.split(".")))]
-    return "# Changelog\n\n## [Unreleased]\n- 移除: ignored\n\n" + "".join(
+    return "# Changelog\n\n## [Unreleased]\n- Not yet.\n\n" + "".join(
         f"## [{v}] - 2026-01-0{i + 1}\n{CHANGES[v]}\n" for i, v in reversed(list(enumerate(versions))))
 
 
@@ -58,11 +58,9 @@ def test_lists_only_newer_versions_newest_first(repos):
     assert result["status"] == "update_available" and result["current"] == "0.1.0" and result["latest"] == "0.3.0"
     assert [r["version"] for r in result["releases"]] == ["0.3.0", "0.2.0"]
     newest, older = result["releases"]
-    assert newest["notes"] == ["New sidebar."] and newest["date"] == "2026-01-03"
-    assert newest["settings_changes"] == [{"kind": "removed", "key": "workspace_layout", "detail": ""}]
-    assert older["settings_changes"] == [{"kind": "changed", "key": "terminal_font_size", "detail": "預設改為 13"}]
+    assert newest["notes"] == ["New sidebar.", "Wider cards."] and newest["date"] == "2026-01-03"
+    assert older["notes"] == ["Faster terminals."]
     assert updates.load_cached(repos["data"]) == result
-    assert [c["version"] for c in updates.settings_changes(result)] == ["0.3.0", "0.2.0"]
 
 
 def test_current_version_reports_no_releases(repos, monkeypatch):
@@ -84,8 +82,7 @@ def test_parse_changelog_skips_unreleased_unless_asked():
     text = changelog("0.3.0")
     assert set(updates.parse_changelog(text)) == {"0.1.0", "0.2.0", "0.3.0"}
     unreleased = updates.parse_changelog(text, include_unreleased=True)["Unreleased"]
-    assert unreleased["settings_changes"] == []           # bullets outside 設定變更 are notes
-    assert unreleased["notes"] == ["移除: ignored"]
+    assert unreleased["notes"] == ["Not yet."]
 
 
 def test_dirty_tree_is_detected(repos):
@@ -114,7 +111,7 @@ def test_apply_pulls_after_backup_and_reports_missing_uv(repos, monkeypatch, cap
     monkeypatch.setattr(runtime, "trusted_executable", trusted)
     assert updates.apply(repos["clone"], data) == 5
     output = capsys.readouterr().out
-    assert "移除: workspace_layout" in output and "uv sync" in output
+    assert "uv sync" in output
     assert "## [0.3.0]" in (repos["clone"] / "CHANGELOG.md").read_text(encoding="utf-8")
     assert len(list((data / "backups").iterdir())) == 1
 
@@ -143,7 +140,7 @@ def test_cache_rejects_malformed_data(tmp_path):
     runtime.write_json(tmp_path / updates.CACHE_NAME, good)
     assert updates.load_cached(tmp_path) == good
     for bad in ({**good, "status": "maybe"}, {**good, "releases": [{"version": "latest"}]},
-                {**good, "releases": [{"version": "1.0.0", "date": "", "notes": [1], "settings_changes": []}]},
+                {**good, "releases": [{"version": "1.0.0", "date": "", "notes": [1]}]},
                 {**good, "current": None}):
         runtime.write_json(tmp_path / updates.CACHE_NAME, bad)
         assert updates.load_cached(tmp_path) is None

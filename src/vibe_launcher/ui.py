@@ -140,7 +140,7 @@ class RecordDialog(QDialog):
             form.addRow(label, widget)
         for key, label in checkboxes or []:
             widget = QCheckBox(label)
-            widget.setChecked(bool(values.get(key, key == "share_extensions")))
+            widget.setChecked(bool(values.get(key, False)))
             self.fields[key] = widget
             form.addRow(widget)
         root.addLayout(form)
@@ -197,7 +197,7 @@ class RecordDialog(QDialog):
             elif isinstance(widget, QLineEdit):
                 widget.setText(_value(values, key))
             elif isinstance(widget, QCheckBox):
-                widget.setChecked(bool(values.get(key, key == "share_extensions")))
+                widget.setChecked(bool(values.get(key, False)))
         if self.draft is not None:
             self.draft.clear()
 
@@ -384,13 +384,6 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         self.timer.setInterval(2000)
         self.timer.timeout.connect(self._poll)
         self.timer.start()
-        if getattr(store, "readonly", False):
-            # A newer launcher wrote this database: show it, but never write to it (see store.SCHEMA_VERSION).
-            self._toast(tr("The database was created by a newer version of Vibe Launcher; this version can only read it."), "danger")
-        for account in ([] if getattr(store, "readonly", False) else self._records.get("accounts", [])):
-            if account.get("manual_import_notice"):
-                self._toast(tr('ui.42bf1eb0ab62'), "warn")
-                self.store.save("accounts", {**account, "manual_import_notice": False})
 
     # ------------------------------------------------------------------ build
     def _prime_gpu_composition(self) -> None:
@@ -1651,9 +1644,8 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
                            latest=report.get("latest", "")), "info")
 
     def apply_update(self) -> None:
-        """Back up settings, warn about settings a new version removes or changes, then update in a terminal."""
+        """Back up settings, then update in a terminal."""
         from . import updates
-        from .about import change_text, settings_changes
         repo = updates.repo_root()
         report = self.update_report() or {}
         packaged = selfcmd.frozen()
@@ -1665,13 +1657,9 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
             if not clean:
                 self._notice(tr("The program folder has local changes, so updating is paused to keep them safe.") + "\n" + reason)
                 return
-        changes = settings_changes(report)
-        message = (tr("Your settings are backed up first; existing values are not changed. The launcher will close and start again by itself; local terminals that are still running end (SSH work kept in tmux keeps running).")
+        message = (tr("Your data is backed up first. The launcher will close and start again by itself; local terminals that are still running end (SSH work kept in tmux keeps running).")
                    if packaged else
-                   tr("Your settings are backed up first; existing values are not changed. Restart the launcher afterwards."))
-        if changes:
-            message += "\n\n" + tr("These versions change settings:") + "\n" + "\n".join(
-                f"v{version}  {change_text(change)}" for version, change in changes)
+                   tr("Your data is backed up first. Restart the launcher afterwards."))
         if not self._confirm(tr("Update Vibe Launcher"), message, confirm_text=tr("Update")):
             return
         data = str(self.store.path.parent)
@@ -2011,7 +1999,7 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
             if values.get("auth") != "subscription" or self._by_id("environments", values.get("environment_id", "")).get("kind") != "ssh":
                 self._notice(tr('ui.af869b01737d'))
                 return
-            values.update(model="", base_url="", share_extensions=False, import_history=False, share_project_history=False)
+            values.update(model="", base_url="", share_project_history=False)
         if kind == "accounts" and values.get("auth") == "api":
             values["environment_id"] = ""        # a key / endpoint is not tied to a machine
         if kind == "environments" and values["kind"] == "local":

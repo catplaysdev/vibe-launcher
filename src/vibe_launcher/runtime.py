@@ -525,7 +525,7 @@ def api_key(account: dict, root: Path, replace: bool = False) -> str:
     validate_endpoint(account)
     path = profile_dir(root, account) / "api-key"
     binding = hashlib.sha256(json.dumps([account["tool"], account.get("base_url", ""),
-                                        account.get("credential_revision", "legacy")]).encode()).hexdigest()
+                                        account.get("credential_revision", "")]).encode()).hexdigest()
     current = None
     if not replace:
         raw = windows_secret(account) if WINDOWS else (read_private(path) if path.exists() else None)
@@ -534,7 +534,7 @@ def api_key(account: dict, root: Path, replace: bool = False) -> str:
             if saved.get("binding") == binding:
                 current = saved.get("key")
         except (ValueError, AttributeError):
-            pass  # Legacy unbound credentials require explicit re-entry.
+            pass  # unreadable: ask for the key again
     if current:
         return current
     if not sys.stdin.isatty():

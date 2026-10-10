@@ -1,6 +1,5 @@
 """Subscription logins live where they were made; projects pick the account when opened; missing folders are offered."""
 import json
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -18,7 +17,7 @@ SUB = {"id": "sub", "name": "S", "tool": "claude", "auth": "subscription"}
 def test_a_subscription_only_fits_the_environment_it_is_bound_to():
     bound = dict(SUB, environment_id="gpu")
     assert runtime.account_fits(bound, "gpu") and not runtime.account_fits(bound, "local")
-    assert runtime.account_fits(SUB, "anything")                       # legacy / unbound: allowed everywhere
+    assert runtime.account_fits(SUB, "anything")                       # unbound: allowed everywhere
     assert runtime.account_fits({"auth": "api", "environment_id": ""}, "gpu")
 
 
@@ -30,60 +29,6 @@ def test_an_api_account_is_never_bound(tmp_path):
     assert sub["environment_id"] == "gpu"
     with pytest.raises(ValueError):
         store.save("accounts", {"id": "bad", "name": "B", "tool": "codex", "auth": "subscription", "environment_id": "../x"})
-
-
-def _legacy_database(path: Path) -> None:
-    """A database written before accounts had a binding and before projects could lack an account."""
-    connection = sqlite3.connect(path)
-    connection.executescript("""
-        CREATE TABLE accounts (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
-        CREATE TABLE environments (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
-        CREATE TABLE presets (id TEXT PRIMARY KEY, payload TEXT NOT NULL,
-            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
-            environment_id TEXT NOT NULL REFERENCES environments(id) ON DELETE RESTRICT);
-        CREATE TABLE sessions (id TEXT PRIMARY KEY, payload TEXT NOT NULL,
-            preset_id TEXT REFERENCES presets(id) ON DELETE RESTRICT,
-            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
-            environment_id TEXT NOT NULL REFERENCES environments(id) ON DELETE RESTRICT);
-        CREATE TABLE auth_states (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
-        CREATE TABLE workspaces (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
-    """)
-
-    def put(table, record, **columns):
-        names = ["id", "payload", *columns]
-        connection.execute(f"INSERT INTO {table} ({', '.join(names)}) VALUES ({', '.join('?' for _ in names)})",
-                           [record["id"], json.dumps(record), *columns.values()])
-
-    for env in ({"id": "local", "name": "本機", "kind": "local", "ssh_target": ""}, {"id": "gpu", "name": "GPU", "kind": "ssh", "ssh_target": "gpu"}):
-        put("environments", env)
-    put("accounts", {"id": "one", "name": "One", "tool": "claude", "auth": "subscription"})
-    put("accounts", {"id": "two", "name": "Two", "tool": "codex", "auth": "subscription"})
-    put("accounts", {"id": "none", "name": "None", "tool": "codex", "auth": "subscription"})
-    put("accounts", {"id": "key", "name": "Key", "tool": "codex", "auth": "api", "model": "m"})
-    for state in ("one:gpu", "two:gpu", "two:local"):
-        put("auth_states", {"id": state, "status": "authenticated"})
-    put("presets", {"id": "p", "name": "P", "account_id": "one", "environment_id": "gpu", "path": "/w"}, account_id="one", environment_id="gpu")
-    put("sessions", {"id": "s", "name": "P", "account_id": "one", "environment_id": "gpu", "path": "/w", "preset_id": "p"},
-        preset_id="p", account_id="one", environment_id="gpu")
-    connection.commit()
-    connection.close()
-
-
-def test_an_old_database_is_upgraded_without_losing_anything(tmp_path):
-    path = tmp_path / "old.db"
-    _legacy_database(path)
-    store = Store(path)
-    bound = {a["id"]: a["environment_id"] for a in store.list("accounts")}
-    assert bound == {"one": "gpu", "two": "", "none": "", "key": ""}      # unambiguous -> bound; ambiguous stays unbound
-    assert store.get("presets", "p")["account_id"] == "one" and store.get("sessions", "s")["preset_id"] == "p"
-    # projects and shell sessions may now have no account at all
-    store.save("presets", {"id": "free", "name": "Free", "account_id": "", "environment_id": "gpu", "path": "/x"})
-    assert store.get("presets", "free")["ask_account"] is True
-    store.save("sessions", {"id": "sh", "name": "Free", "account_id": "", "environment_id": "gpu", "path": "/x", "mode": "shell"})
-    with pytest.raises(ValueError):
-        store.save("sessions", {"id": "ag", "name": "Free", "account_id": "", "environment_id": "gpu", "path": "/x"})
-    Store(path)                                                          # opening it again is harmless
-    assert len(Store(path).list("presets")) == 2
 
 
 # -------------------------------------------------------------------------------------- the service

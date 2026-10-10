@@ -2,10 +2,7 @@
 
 Kept out of the SQLite store on purpose: these are view settings, not launcher
 records, so they are never part of exported/imported configuration.
-
-Compatibility: a file written by a newer build must survive an older build untouched. Unknown keys are kept in
-``_extra`` and written back, and a known key whose stored value this build cannot use (for example a theme added
-later) keeps its stored value on disk unless the user actually changes that setting here.
+A value this build cannot use falls back to its default; keys it does not know are dropped on the next save.
 """
 
 from __future__ import annotations
@@ -16,8 +13,6 @@ from pathlib import Path
 from .theme import TERMINAL_FONT_SIZES, THEMES, UI_SCALES, valid_color, valid_font_family
 from . import runtime
 
-
-PREFS_VERSION = 1
 
 
 def valid_anchor(value: object) -> list[float] | None:
@@ -42,15 +37,8 @@ def stored_ui_scale(path: Path) -> int:
 
 
 class UiPrefs:
-    # Defaults that depend on the machine (e.g. the OS language) rather than on the code.
-    DYNAMIC_DEFAULTS = frozenset({"language"})
-
     def __init__(self, path: Path):
         self.path = Path(path)
-        self.version = PREFS_VERSION
-        self._extra: dict = {}                  # keys written by newer builds; preserved verbatim
-        self._raw: dict = {}                    # stored values of known keys, as found on disk
-        self._loaded: dict = {}                 # what this build understood from them
         self.sidebar_collapsed = False
         self.pinned: set[str] = set()
         self.project_icons: dict[str, dict] = {}   # project id -> icon entry (see project_icons.valid_entry)
@@ -83,8 +71,6 @@ class UiPrefs:
             return
         if not isinstance(data, dict):
             return
-        version = data.get("version")
-        self.version = max(version, PREFS_VERSION) if type(version) is int else PREFS_VERSION
         self.sidebar_collapsed = bool(data.get("sidebar_collapsed", False))
         self.external_terminal = bool(data.get("external_terminal", False))
         self.workspace_layout = data.get("workspace_layout") if data.get("workspace_layout") in {"tabs", "grid"} else "tabs"
@@ -116,10 +102,6 @@ class UiPrefs:
         self.toast_anchor = valid_anchor(data.get("toast_anchor"))
         self.update_check = data.get("update_check", True) is not False
         self.sessions_grouping = "time" if data.get("sessions_grouping") == "time" else "project"
-        known = self.snapshot()
-        self._extra = {k: v for k, v in data.items() if k not in known and k != "version"}
-        self._raw = {k: data[k] for k in known if k in data}
-        self._loaded = known
 
     def snapshot(self) -> dict:
         """The known preferences in their stored (JSON) form."""
@@ -135,13 +117,7 @@ class UiPrefs:
                 "sessions_grouping": self.sessions_grouping}
 
     def save(self) -> None:
-        current = self.snapshot()
-        payload = dict(self._extra)
-        for key, value in current.items():
-            # Untouched here -> keep exactly what was on disk (a newer build may have stored a value we cannot use).
-            payload[key] = self._raw[key] if key in self._raw and value == self._loaded.get(key) else value
-        payload["version"] = max(self.version, PREFS_VERSION)
         try:
-            runtime.write_json(self.path, payload)
+            runtime.write_json(self.path, self.snapshot())
         except OSError:
             pass  # View preferences are best-effort; never block the UI on them.

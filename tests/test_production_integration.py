@@ -1,9 +1,6 @@
-import ast
 import base64
 import json
 import lzma
-import shlex
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -12,26 +9,6 @@ from vibe_launcher import runtime
 from vibe_launcher.service import LauncherService, _compressed_runtime, remote_command
 from vibe_launcher.store import Store
 from vibe_launcher.ui import MainWindow
-
-
-def test_manual_migration_preserves_profiles_and_records(tmp_path):
-    path = tmp_path / 'legacy.sqlite3'
-    old = Store(path)
-    account = old.save('accounts', {'id': 'ai', 'name': 'AI', 'tool': 'codex', 'auth': 'subscription', 'share_extensions': True, 'import_history': True})
-    project = old.save('presets', {'id': 'project', 'name': 'Project', 'path': 'C:/project', 'environment_id': 'local', 'account_id': 'ai'})
-    profile = tmp_path / 'profiles/codex/ai'
-    profile.mkdir(parents=True)
-    transcript = profile / 'session.jsonl'
-    transcript.write_text('{"conversation":"existing"}\n', encoding='utf-8')
-    with sqlite3.connect(path) as db:
-        db.execute('PRAGMA user_version=0')
-    migrated = Store(path)
-    record = migrated.get('accounts', 'ai')
-    assert record['manual_import_notice'] and not record['share_extensions'] and not record['import_history']
-    assert migrated.get('presets', 'project') == project
-    assert transcript.read_text(encoding='utf-8') == '{"conversation":"existing"}\n'
-    migrated.save('accounts', {**record, 'manual_import_notice': False})
-    assert not Store(path).get('accounts', 'ai')['manual_import_notice']
 
 
 def test_github_export_requires_revalidation_and_preserves_separation(tmp_path):

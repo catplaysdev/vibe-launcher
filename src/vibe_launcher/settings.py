@@ -1,8 +1,6 @@
 """Nonsecret shell and CLI extension manifests, shared by UI and service.
 
-Compatibility: settings.json written by a newer build (higher ``version`` or extra fields) is accepted; the fields
-this build does not know are kept and written back on save, and a file that cannot be used is left untouched while the
-launcher falls back to defaults.
+A settings.json that cannot be used is left untouched while the launcher falls back to defaults.
 """
 from __future__ import annotations
 
@@ -23,14 +21,13 @@ BUILTIN_PROFILES = [
 ]
 SETTINGS_VERSION = 1
 DEFAULT_SETTINGS = {"version": SETTINGS_VERSION, "shells": {"windows": "auto", "linux": "bash"}, "plugins": []}
-KNOWN_FIELDS = frozenset({"version", "shells", "plugins"})
 log = logging.getLogger(__name__)
 
 
 def validate_settings(data: object) -> dict:
-    """Validate the fields this build knows; unknown fields (from newer builds) are carried through unchanged."""
-    if not isinstance(data, dict) or type(data.get("version")) is not int or data.get("version") < 1:
-        raise ValueError("Settings need a positive integer version")
+    """Validate the settings; fields this build does not know are dropped."""
+    if not isinstance(data, dict) or data.get("version") != SETTINGS_VERSION or type(data.get("version")) is not int:
+        raise ValueError(f"Settings need version {SETTINGS_VERSION}")
     plugins = data.get("plugins", [])
     if not isinstance(plugins, list) or len(plugins) > 32:
         raise ValueError("At most 32 CLI plugins are supported")
@@ -49,9 +46,8 @@ def validate_settings(data: object) -> dict:
         selected = shells.get(platform, DEFAULT_SETTINGS["shells"][platform])
         if not isinstance(selected, str) or not any(p["id"] == selected and platform in p["platforms"] for p in BUILTIN_PROFILES + plugins):
             raise ValueError("Unknown or incompatible default shell for " + platform)
-    result = {"version": data["version"], "shells": {p: shells.get(p, DEFAULT_SETTINGS["shells"][p]) for p in ("windows", "linux")},
+    result = {"version": SETTINGS_VERSION, "shells": {p: shells.get(p, DEFAULT_SETTINGS["shells"][p]) for p in ("windows", "linux")},
               "plugins": plugins}
-    result.update((k, v) for k, v in data.items() if k not in KNOWN_FIELDS)
     if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > 65536:
         raise ValueError("CLI settings exceed the 64 KiB size limit")
     return result
@@ -80,26 +76,17 @@ def load_settings(root: Path) -> dict:
 
 
 def save_settings(root: Path, data: dict) -> None:
-    """Save validated settings without losing what newer builds stored: unknown fields and the higher version stay."""
+    """Save validated settings; an existing file that cannot be read is set aside, never silently replaced."""
     path = root / "settings.json"
     result = validate_settings(data)
     try:
-        existing = _read_raw(path) or {}
+        _read_raw(path)
     except (OSError, ValueError, TypeError):
-        existing = {}
         if path.exists():  # unusable but present: keep a copy instead of silently replacing it
             runtime.assert_private_path(path)
             aside = path.with_name(f"settings.unreadable-{time.strftime('%Y%m%d-%H%M%S')}.json")
             if not aside.exists():
                 path.replace(aside)
-    for key, value in existing.items():
-        if key not in KNOWN_FIELDS:
-            result.setdefault(key, value)
-    stored = existing.get("version")
-    if type(stored) is int and stored > result["version"]:
-        result["version"] = stored
-    if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > 65536:
-        raise ValueError("CLI settings exceed the 64 KiB size limit")
     runtime.write_json(path, result)
 
 
