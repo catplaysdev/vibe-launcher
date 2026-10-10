@@ -12,7 +12,7 @@ from .i18n import environment_name, tr
 
 import json
 import platform
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -281,6 +281,29 @@ def load_tool_reports(root: Path, environment_id: str) -> tuple[ToolReport, ...]
     return tuple(reports)
 
 
+def known_latest(root: Path) -> dict[str, str]:
+    """The newest upstream release any environment's check has seen, per tool: every check asks the same registry,
+    so checking one machine also tells the others whether they are behind."""
+    best: dict[str, tuple[int, ...]] = {}
+    folder = root / "tool-versions"
+    for path in sorted(folder.glob("*.json")) if folder.is_dir() else []:
+        raw = _read_json(path).get("reports", [])
+        for item in raw if isinstance(raw, list) else []:
+            number = runtime.version_number(str(item.get("latest", ""))) if isinstance(item, dict) else None
+            if number and item.get("tool") in TOOLS and number > best.get(item["tool"], ()):
+                best[item["tool"]] = number
+    return {tool: ".".join(map(str, number)) for tool, number in best.items()}
+
+
+def with_known_latest(report: ToolReport, latest: str) -> ToolReport:
+    """Compare an environment's installed version with a newer release found by another environment's check."""
+    installed, newest, own = (runtime.version_number(v) for v in (report.installed, latest, report.latest))
+    if not installed or not newest or (own and own >= newest) or report.status == "update_failed":
+        return report
+    status = "update_available" if installed < newest else ("current" if installed == newest else "newer_than_registry")
+    return replace(report, latest=latest, status=status)
+
+
 def format_tool_report(r: ToolReport) -> str:
     """Verbose per-tool diagnostics text (kept for the collapsible diagnostics block)."""
     lines = [tr('env_state.22301ca83dc4', v0=f'{r.tool}', v1=f'{r.installed}', v2=f'{r.latest}', v3=f'{r.source}', v4=f'{r.status}'), tr('env_state.35199b2fd0ab', v0=f'{r.path}')]
@@ -330,7 +353,8 @@ def build_env_state(env: dict[str, Any], *, records: dict[str, list[dict[str, An
     mode = str(env.get("ssh_auth_mode", "interactive")) if kind == "ssh" else "interactive"
     remember = int(env.get("remember_seconds", 0) or 0) if kind == "ssh" else 0
     target = str(env.get("ssh_target", "") or "")
-    reports = load_tool_reports(root, env_id)
+    newest = known_latest(root)
+    reports = tuple(with_known_latest(r, newest[r.tool]) if r.tool in newest else r for r in load_tool_reports(root, env_id))
     by_tool = {r.tool: r for r in reports}
     reasons: list[tuple[str, str]] = []  # (tone, text)
     chips: list[Chip] = []
