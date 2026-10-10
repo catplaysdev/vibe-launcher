@@ -1085,7 +1085,6 @@
   "running or in the background": "个工作在执行或背景执行",
   "work in an unknown state": "个工作状态不明",
   "{count} newer version(s) available, latest v{latest}.": "有 {count} 个较新版本，最新为 v{latest}。",
-  "By project": "依项目",
   "By time": "依时间",
   "Clear finished": "清除已结束",
   "Hide": "收合",
@@ -1182,5 +1181,8 @@
   "The terminal could not be started again; the old one was kept where possible.": "无法重新启动这个终端；已尽可能保留原来的终端。",
   "Restore": "恢复",
   "Your data is backed up first. Restart the launcher afterwards.": "会先备份你的数据。完成后请重新启动启动器。",
-  "Your data is backed up first. The launcher will close and start again by itself; local terminals that are still running end (SSH work kept in tmux keeps running).": "会先备份你的数据。启动器会自行关闭并重新打开；仍在运行的本机终端会结束（用 tmux 保留的 SSH 任务会继续运行）。"
+  "Your data is backed up first. The launcher will close and start again by itself; local terminals that are still running end (SSH work kept in tmux keeps running).": "会先备份你的数据。启动器会自行关闭并重新打开；仍在运行的本机终端会结束（用 tmux 保留的 SSH 任务会继续运行）。",
+  "By workspace": "按工作区",
+  "Switch": "切换",
+  "{n} project(s)": "{n} 个项目"
 }

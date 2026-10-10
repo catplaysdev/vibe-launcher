@@ -1085,7 +1085,6 @@
   "running or in the background": "running or in the background",
   "work in an unknown state": "work in an unknown state",
   "{count} newer version(s) available, latest v{latest}.": "{count} newer version(s) available, latest v{latest}.",
-  "By project": "By project",
   "By time": "By time",
   "Clear finished": "Clear finished",
   "Hide": "Hide",
@@ -1182,5 +1181,8 @@
   "The terminal could not be started again; the old one was kept where possible.": "The terminal could not be started again; the old one was kept where possible.",
   "Restore": "Restore",
   "Your data is backed up first. Restart the launcher afterwards.": "Your data is backed up first. Restart the launcher afterwards.",
-  "Your data is backed up first. The launcher will close and start again by itself; local terminals that are still running end (SSH work kept in tmux keeps running).": "Your data is backed up first. The launcher will close and start again by itself; local terminals that are still running end (SSH work kept in tmux keeps running)."
+  "Your data is backed up first. The launcher will close and start again by itself; local terminals that are still running end (SSH work kept in tmux keeps running).": "Your data is backed up first. The launcher will close and start again by itself; local terminals that are still running end (SSH work kept in tmux keeps running).",
+  "By workspace": "By workspace",
+  "Switch": "Switch",
+  "{n} project(s)": "{n} project(s)"
 }

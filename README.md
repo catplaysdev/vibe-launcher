@@ -104,7 +104,7 @@ size, `Ctrl+Shift+Space` keyboard navigation. All shortcuts can be changed in **
 - **Home**: what is running, accounts that need signing in, a card per workspace (projects, open and running
   terminals; click to switch), recent projects (with **Restore** for the ones waiting in a workspace) and environments.
 - **Sessions**: every run with its real status (from the remote supervisor's exit code, not terminal output); bulk
-  stop / clean-up, grouped by project or time.
+  stop / clean-up, grouped as workspace › project › terminal, or listed by time.
 - **Integrations**: GitHub account and commit identity per project (official `gh`), Codex quota view,
   DeepSeek Harness Web (experimental).
 - **Customisation**: 8 colour themes and accent colours, separate interface and terminal fonts, interface scale (80–200%), English / 繁體中文 / 简体中文 / 日本語 / 한국어 / Deutsch / Español UI,

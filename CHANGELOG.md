@@ -24,6 +24,7 @@
 - 重啟後在工作區等待恢復的專案標示「可恢復」並走恢復流程；恢復不重複開已開著的終端，失敗的終端留待重試、不清空配置；修正重啟後停在已存工作區時預設工作區配置被清空、外部終端模式也會清空的問題；SSH 直接執行（非 tmux）的工作沒開終端時顯示「狀態不明」而非「背景執行」；Claude plugins 啟用設定只讀專案資料夾本身。
 - 首頁最近專案中「可恢復」的按鈕改為「恢復」；重新載入本機終端時，被取代的工作階段立即記為已結束。README、使用手冊與人工驗收清單同步更新（多語系介面、工作區恢復、測試指令）。
 - 開發階段不再保留舊版相容：移除資料庫遷移與唯讀模式、帳號的 `share_extensions`／`import_history`／`manual_import_notice` 欄位、版本 1 設定檔匯入、`ui-state.json`／`settings.json` 保留未知欄位的機制，以及更新前的「設定變更」提醒；資料庫中不認得的欄位在下次儲存時移除。
+- 工作階段頁改為「工作區 › 專案 › 終端」三層分組（取代依專案分組）：終端開著的歸在所在工作區，其餘依專案所屬的工作區，未加入工作區的放最後；工作區標題可直接切換過去。介面設定 `sessions_grouping` 的值改為 `workspace`／`time`。
 - 分支規則改為 Git Flow（main 正式版、develop 與 hotfix 測試版、`feat/dev_*`／`fix_*` 只留在本機），新增 `.githooks/pre-push` 阻擋推送工作分支，CI 改為在 main／develop／hotfix 推送與 PR 到 main 時執行。
 - 終端標題列新增「重新載入」；重新載入與輸入列按 Enter 送出前會確認，可勾選「不再詢問」，並可在「設定 → 終端 → 確認通知」改回。
 - 新增介面設定：`workspace_icons`、`default_workspace_name`、`default_workspace`、`last_workspace`、`confirm_reload`、`confirm_send`（`ui-state.json`）。

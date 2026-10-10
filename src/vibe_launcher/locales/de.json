@@ -1085,7 +1085,6 @@
   "running or in the background": "Läuft oder im Hintergrund",
   "work in an unknown state": "Arbeit mit unbekanntem Status",
   "{count} newer version(s) available, latest v{latest}.": "{count} neuere Version(en) verfügbar, aktuellste: v{latest}.",
-  "By project": "Nach Projekt",
   "By time": "Nach Zeit",
   "Clear finished": "Abgeschlossene entfernen",
   "Hide": "Ausblenden",
@@ -1182,5 +1181,8 @@
   "The terminal could not be started again; the old one was kept where possible.": "Das Terminal konnte nicht neu gestartet werden; das alte wurde nach Möglichkeit behalten.",
   "Restore": "Wiederherstellen",
   "Your data is backed up first. Restart the launcher afterwards.": "Deine Daten werden zuerst gesichert. Starte den Launcher danach neu.",
-  "Your data is backed up first. The launcher will close and start again by itself; local terminals that are still running end (SSH work kept in tmux keeps running).": "Deine Daten werden zuerst gesichert. Der Launcher schließt sich und startet von selbst neu; noch laufende lokale Terminals werden beendet (in tmux gehaltene SSH-Arbeit läuft weiter)."
+  "Your data is backed up first. The launcher will close and start again by itself; local terminals that are still running end (SSH work kept in tmux keeps running).": "Deine Daten werden zuerst gesichert. Der Launcher schließt sich und startet von selbst neu; noch laufende lokale Terminals werden beendet (in tmux gehaltene SSH-Arbeit läuft weiter).",
+  "By workspace": "Nach Workspace",
+  "Switch": "Wechseln",
+  "{n} project(s)": "{n} Projekt(e)"
 }
