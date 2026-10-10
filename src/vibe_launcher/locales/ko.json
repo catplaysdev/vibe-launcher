@@ -1085,7 +1085,6 @@
   "running or in the background": "실행 중 또는 백그라운드 실행 중",
   "work in an unknown state": "상태를 알 수 없는 작업",
   "{count} newer version(s) available, latest v{latest}.": "새 버전 {count}개 사용 가능, 최신 버전 v{latest}.",
-  "By project": "프로젝트별",
   "By time": "시간순",
   "Clear finished": "완료 항목 지우기",
   "Hide": "숨기기",
@@ -1182,5 +1181,8 @@
   "The terminal could not be started again; the old one was kept where possible.": "터미널을 다시 시작하지 못했습니다. 가능한 경우 기존 터미널을 유지했습니다.",
   "Restore": "복원",
   "Your data is backed up first. Restart the launcher afterwards.": "먼저 데이터를 백업합니다. 완료 후 런처를 다시 시작하세요.",
-  "Your data is backed up first. The launcher will close and start again by itself; local terminals that are still running end (SSH work kept in tmux keeps running).": "먼저 데이터를 백업합니다. 런처가 스스로 종료한 뒤 다시 시작하며, 실행 중인 로컬 터미널은 종료됩니다(tmux로 유지되는 SSH 작업은 계속 실행됩니다)."
+  "Your data is backed up first. The launcher will close and start again by itself; local terminals that are still running end (SSH work kept in tmux keeps running).": "먼저 데이터를 백업합니다. 런처가 스스로 종료한 뒤 다시 시작하며, 실행 중인 로컬 터미널은 종료됩니다(tmux로 유지되는 SSH 작업은 계속 실행됩니다).",
+  "By workspace": "워크스페이스별",
+  "Switch": "전환",
+  "{n} project(s)": "프로젝트 {n}개"
 }

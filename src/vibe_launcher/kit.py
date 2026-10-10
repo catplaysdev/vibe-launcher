@@ -1898,6 +1898,7 @@ class CommandPalette(QDialog):
 BADGE_ROLE = int(Qt.ItemDataRole.UserRole) + 1   # item data: (label, tone) drawn as a status pill on the right
 ICON_ROLE = int(Qt.ItemDataRole.UserRole) + 5    # item data: (icon name, colour token) drawn as a quiet tile on the left
 GROUP_ROLE = int(Qt.ItemDataRole.UserRole) + 6   # item data: group key; the row is a heading drawn by its own widget
+INDENT_ROLE = int(Qt.ItemDataRole.UserRole) + 7  # item data: left indent in pixels (a row nested under headings)
 
 
 class TwoLineDelegate(QStyledItemDelegate):
@@ -1919,7 +1920,7 @@ class TwoLineDelegate(QStyledItemDelegate):
         lines = self._lines(index)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(option.rect).adjusted(2, 1, -2, -1)
+        rect = QRectF(option.rect).adjusted(2 + int(index.data(INDENT_ROLE) or 0), 1, -2, -1)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
         painter.setPen(Qt.PenStyle.NoPen)

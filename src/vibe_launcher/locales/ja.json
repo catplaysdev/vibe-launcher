@@ -1085,7 +1085,6 @@
   "running or in the background": "実行中またはバックグラウンド",
   "work in an unknown state": "状態不明の作業",
   "{count} newer version(s) available, latest v{latest}.": "新しいバージョンが {count} 件あります。最新は v{latest} です。",
-  "By project": "プロジェクト別",
   "By time": "時刻順",
   "Clear finished": "完了分を消去",
   "Hide": "非表示",
@@ -1182,5 +1181,8 @@
   "The terminal could not be started again; the old one was kept where possible.": "ターミナルを再起動できませんでした。可能な範囲で元のターミナルを残しています。",
   "Restore": "復元",
   "Your data is backed up first. Restart the launcher afterwards.": "最初にデータをバックアップします。完了後にランチャーを再起動してください。",
-  "Your data is backed up first. The launcher will close and start again by itself; local terminals that are still running end (SSH work kept in tmux keeps running).": "最初にデータをバックアップします。ランチャーは自動で終了して再起動します。実行中のローカルターミナルは終了します（tmux で保持されている SSH の作業は続行します）。"
+  "Your data is backed up first. The launcher will close and start again by itself; local terminals that are still running end (SSH work kept in tmux keeps running).": "最初にデータをバックアップします。ランチャーは自動で終了して再起動します。実行中のローカルターミナルは終了します（tmux で保持されている SSH の作業は続行します）。",
+  "By workspace": "ワークスペース別",
+  "Switch": "切り替え",
+  "{n} project(s)": "{n} 件のプロジェクト"
 }

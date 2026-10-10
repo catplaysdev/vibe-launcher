@@ -10,17 +10,18 @@ from .i18n import tr
 from typing import Any
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QListWidgetItem, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QListWidgetItem, QWidget
 
 from . import env_state
 from . import runtime as runtime_module
-from .kit import BADGE_ROLE, GROUP_ROLE, ICON_ROLE, IconButton, label, make_button
+from .kit import BADGE_ROLE, GROUP_ROLE, ICON_ROLE, INDENT_ROLE, IconButton, label, make_button
 from .theme import S, TOOL_ICONS
 from .ui_format import TONE_TOKENS, _display_time, _value
 
 LIVE = {"connecting", "waiting_auth", "running", "detached"}
 FINISHED = {"ended", "failed"}
 OTHER = "__other__"          # group of work whose project was deleted
+NOWHERE = "@none"            # work whose project is in no workspace
 
 
 class SessionActions:
@@ -36,12 +37,12 @@ class SessionActions:
                 continue
             shown.append(session)
             rows.append(self._session_row(session))
-        if getattr(self.prefs, "sessions_grouping", "project") == "time":
+        if getattr(self.prefs, "sessions_grouping", "workspace") == "time":
             self._fill_list(self.sessions_list, rows)
         else:
             self._fill_session_groups(self._session_groups(shown, fold_finished=view != "finished"))
         if hasattr(self, "session_grouping"):
-            self.session_grouping.set_current(getattr(self.prefs, "sessions_grouping", "project"), emit=False)
+            self.session_grouping.set_current(getattr(self.prefs, "sessions_grouping", "workspace"), emit=False)
         self.sessions_panel.show_empty(not rows)
         self._render_session_summary()
         self._sync_session_actions()
@@ -60,38 +61,68 @@ class SessionActions:
         tool = "shell" if _value(session, "mode") == "shell" else _value(account, "tool", "shell")
         return (text, session.get("id"), _value(session, "path"), badge, (TOOL_ICONS.get(tool, "terminal"), TONE_TOKENS.get(badge[1], "neutral")))
 
-    # -- grouped by project -------------------------------------------------------------------
+    # -- grouped by workspace, then project -------------------------------------------------------------
+    def _session_workspace(self, session: dict[str, Any], open_on: dict[str, str], members: dict[str, list[str]]) -> str:
+        """The desktop a session belongs to: where its terminal is open, else the first desktop holding its project."""
+        if session.get("id") in open_on:
+            return open_on[session["id"]]
+        places = members.get(_value(session, "preset_id"), [])
+        return places[0] if places else NOWHERE
+
     def _session_groups(self, sessions: list[dict[str, Any]], fold_finished: bool = True) -> list[dict[str, Any]]:
-        """One group per project: projects with live work first, then the most recently active."""
-        groups: dict[str, dict[str, Any]] = {}
+        """Workspaces (picker order, then work in no workspace), each holding its projects, each holding its terminals.
+
+        Inside a workspace, projects with live work come first, then unclear ones, then finished ones (folded)."""
+        page = getattr(self, "workspace", None)
+        open_on = {tab.info.session_id: tab.info.workspace_id for tab in page.tabs() if tab.info.session_id} if page else {}
+        members = self._workspace_membership() if page else {}
+        order = page.desktop_ids() if page else [""]
+        collapsed = self.__dict__.setdefault("_session_collapsed", {})
+        spaces: dict[str, dict[str, Any]] = {}
         for session in sessions:                      # already newest first
             preset = self._by_id("presets", _value(session, "preset_id"))
-            key = preset.get("id") or OTHER
-            group = groups.setdefault(key, {"key": key, "sessions": [], "title": _value(preset, "name") if preset else tr("Other work"),
-                                            "environment": _value(self._by_id("environments", _value(preset, "environment_id")), "name")})
+            place = self._session_workspace(session, open_on, members) if preset else NOWHERE
+            space = spaces.setdefault(place, {"key": "ws:" + place, "workspace": place, "projects": {}})
+            project = preset.get("id") or OTHER
+            group = space["projects"].setdefault(project, {
+                "key": f"{place}/{project}", "project": project, "sessions": [],
+                "title": _value(preset, "name") if preset else tr("Other work"),
+                "environment": _value(self._by_id("environments", _value(preset, "environment_id")), "name")})
             group["sessions"].append(session)
-        collapsed = self.__dict__.setdefault("_session_collapsed", {})
         result = []
-        for group in groups.values():
-            statuses = [_value(s, "status", "unknown") for s in group["sessions"]]
-            live, unknown = sum(1 for s in statuses if s in LIVE), statuses.count("unknown")
-            finished = sum(1 for s in statuses if s in FINISHED)
-            parts = [tr("{n} active", n=live) if live else "", tr("{n} unknown", n=unknown) if unknown else "",
-                     tr("{n} finished", n=finished) if finished else ""]
-            group.update(live=live, finished=finished, collapsed_default=live + unknown == 0,
-                         meta=" · ".join(filter(None, [group["environment"], *parts])),
-                         can_recall=group["key"] != OTHER and bool(self._restore_steps(group["key"])),
-                         collapsed=collapsed.get(group["key"], fold_finished and live + unknown == 0),   # only finished work: folded
-                         rows=[self._session_row(s) for s in group["sessions"]])
-            result.append(group)
+        for place in sorted(spaces, key=lambda w: order.index(w) if w in order else len(order) + (w == NOWHERE)):
+            space = spaces[place]
+            projects = []
+            for group in space["projects"].values():
+                statuses = [_value(s, "status", "unknown") for s in group["sessions"]]
+                live, unknown = sum(1 for s in statuses if s in LIVE), statuses.count("unknown")
+                finished = sum(1 for s in statuses if s in FINISHED)
+                parts = [tr("{n} active", n=live) if live else "", tr("{n} unknown", n=unknown) if unknown else "",
+                         tr("{n} finished", n=finished) if finished else ""]
+                group.update(level=1, live=live, unknown=unknown, finished=finished, collapsed_default=live + unknown == 0,
+                             meta=" · ".join(filter(None, [group["environment"], *parts])),
+                             can_recall=group["project"] != OTHER and bool(self._restore_steps(group["project"])),
+                             collapsed=collapsed.get(group["key"], fold_finished and live + unknown == 0),
+                             rows=[self._session_row(s) for s in group["sessions"]])
+                projects.append(group)
+            projects.sort(key=lambda g: (g["live"] == 0, g["collapsed_default"]))    # live, then unclear, then done; stable
+            live = sum(g["live"] for g in projects)
+            title = tr("Not in any workspace") if place == NOWHERE else (page.workspace_name(place) if page else tr("Default workspace"))
+            meta = [tr("{n} project(s)", n=len(projects)), tr("{n} active", n=live) if live else "",
+                    tr("Current") if page and place == page.workspace_id else ""]
+            result.append({"key": space["key"], "workspace": place, "level": 0, "title": title,
+                           "meta": " · ".join(filter(None, meta)), "projects": projects,
+                           "collapsed": collapsed.get(space["key"], False)})
         self._session_group_folded = {g["key"]: g["collapsed"] for g in result}
-        result.sort(key=lambda g: (g["live"] == 0, g["collapsed_default"]))   # live, then unclear, then done; stable
+        self._session_group_folded.update({p["key"]: p["collapsed"] for g in result for p in g["projects"]})
         return result
 
     def _fill_session_groups(self, groups: list[dict[str, Any]]) -> None:
         listing = self.sessions_list
-        signature = [("group", g["key"], g["title"], g["meta"], g["can_recall"], g["finished"], g["collapsed"],
-                      *(g["rows"] if not g["collapsed"] else [])) for g in groups]
+        signature = [("workspace", g["key"], g["title"], g["meta"], g["collapsed"],
+                      *([] if g["collapsed"] else [("project", p["key"], p["title"], p["meta"], p["can_recall"], p["finished"],
+                                                    p["collapsed"], *(p["rows"] if not p["collapsed"] else [])) for p in g["projects"]]))
+                     for g in groups]
         if getattr(listing, "_rows", None) == signature:
             return
         selected = listing.currentItem().data(Qt.ItemDataRole.UserRole) if listing.currentItem() else None
@@ -99,53 +130,76 @@ class SessionActions:
         scroll = listing.verticalScrollBar().value()
         listing.blockSignals(True)
         listing.clear()
-        for group in groups:
-            heading = QListWidgetItem("")
-            heading.setFlags(Qt.ItemFlag.NoItemFlags)
-            heading.setData(GROUP_ROLE, group["key"])
-            heading.setData(Qt.ItemDataRole.AccessibleTextRole, f"{group['title']}，{group['meta']}")
-            listing.addItem(heading)
-            listing.setItemWidget(heading, self._session_group_header(group))
-            if group["collapsed"]:
+
+        def heading(group: dict[str, Any]) -> None:
+            item = QListWidgetItem("")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            item.setData(GROUP_ROLE, group["key"])
+            item.setData(Qt.ItemDataRole.AccessibleTextRole, f"{group['title']}，{group['meta']}")
+            listing.addItem(item)
+            listing.setItemWidget(item, self._session_group_header(group))
+
+        for space in groups:
+            heading(space)
+            if space["collapsed"]:
                 continue
-            for text, record_id, tip, badge, glyph in group["rows"]:
-                item = QListWidgetItem(text)
-                item.setData(Qt.ItemDataRole.UserRole, record_id)
-                item.setData(ICON_ROLE, glyph)
-                item.setData(BADGE_ROLE, badge)
-                item.setData(Qt.ItemDataRole.AccessibleTextRole, f"{text.splitlines()[0]}，{badge[0]}")
-                item.setToolTip(tip)
-                listing.addItem(item)
-                if record_id == selected:
-                    listing.setCurrentItem(item)
-                if record_id in chosen:
-                    item.setSelected(True)
+            for group in space["projects"]:
+                heading(group)
+                if group["collapsed"]:
+                    continue
+                for text, record_id, tip, badge, glyph in group["rows"]:
+                    item = QListWidgetItem(text)
+                    item.setData(Qt.ItemDataRole.UserRole, record_id)
+                    item.setData(ICON_ROLE, glyph)
+                    item.setData(BADGE_ROLE, badge)
+                    item.setData(INDENT_ROLE, S.xl)       # under its project heading
+                    item.setData(Qt.ItemDataRole.AccessibleTextRole, f"{text.splitlines()[0]}，{badge[0]}")
+                    item.setToolTip(tip)
+                    listing.addItem(item)
+                    if record_id == selected:
+                        listing.setCurrentItem(item)
+                    if record_id in chosen:
+                        item.setSelected(True)
         listing.blockSignals(False)
         listing._rows = signature
         listing.verticalScrollBar().setValue(scroll)
 
     def _session_group_header(self, group: dict[str, Any]) -> QWidget:
+        """A workspace heading (its name and icon) or, indented under it, a project heading with its actions."""
         header = QWidget()
         row = QHBoxLayout(header)
-        row.setContentsMargins(0, 0, 0, 0)
+        project = group["level"] == 1
+        row.setContentsMargins(S.xl if project else 0, 0, 0, 0)
         row.setSpacing(S.sm)
         toggle = IconButton("chevron-right" if group["collapsed"] else "chevron-down",
                             tr("Show") if group["collapsed"] else tr("Hide"), size=28, icon_size=16)
         toggle.clicked.connect(lambda *_, k=group["key"]: self._toggle_session_group(k))
         row.addWidget(toggle)
-        title = label(group["title"], "subsection")
+        page = getattr(self, "workspace", None)
+        if not project and page is not None and group["workspace"] != NOWHERE:
+            icon = QLabel()
+            icon.setPixmap(page.workspace_icon(group["workspace"]).pixmap(18, 18))
+            row.addWidget(icon)
+        title = label(group["title"], "subsection" if project else "section")
         title.setTextFormat(Qt.TextFormat.PlainText)
         row.addWidget(title)
         meta = label(group["meta"], "meta")
         meta.setTextFormat(Qt.TextFormat.PlainText)
         row.addWidget(meta, 1)
-        if group["can_recall"]:
+        if not project and page is not None and group["workspace"] != NOWHERE:
+            row.addWidget(make_button(tr("Switch"), "ghost", "arrow-right", small=True,
+                                      callback=lambda *_, w=group["workspace"]: self._show_workspace_from_sessions(w)))
+        if project and group["can_recall"]:
             row.addWidget(make_button(tr("Recall all"), "ghost", "repeat", small=True, tip=tr("Re-attach running work and reopen stopped work"),
-                                      callback=lambda *_, k=group["key"]: self.restore_project(k)))
-        if group["finished"]:
+                                      callback=lambda *_, k=group["project"]: self.restore_project(k)))
+        if project and group["finished"]:
             row.addWidget(make_button(tr("Clear finished"), "ghost", "trash", small=True,
-                                      callback=lambda *_, k=group["key"]: self.clean_finished_sessions(k)))
+                                      callback=lambda *_, k=group["project"]: self.clean_finished_sessions(k)))
         return header
+
+    def _show_workspace_from_sessions(self, workspace_id: str) -> None:
+        self.open_workspace(workspace_id)
+        self.show_page("workspace")
 
     def _toggle_session_group(self, key: str) -> None:
         shown = self.__dict__.get("_session_group_folded", {})
@@ -153,7 +207,7 @@ class SessionActions:
         self._render_sessions()
 
     def set_sessions_grouping(self, mode: str) -> None:
-        self.prefs.sessions_grouping = "time" if mode == "time" else "project"
+        self.prefs.sessions_grouping = "time" if mode == "time" else "workspace"
         self.prefs.save()
         self._render_sessions()
 

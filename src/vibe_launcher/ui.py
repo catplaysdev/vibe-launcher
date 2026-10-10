@@ -785,8 +785,8 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
                                          ("finished", tr("Finished"))])
         self.session_filter.changed.connect(lambda *_: self._render_sessions())
         toolbar.addWidget(self.session_filter)
-        self.session_grouping = FilterBar([("project", tr("By project")), ("time", tr("By time"))])
-        self.session_grouping.set_current(getattr(self.prefs, "sessions_grouping", "project"), emit=False)
+        self.session_grouping = FilterBar([("workspace", tr("By workspace")), ("time", tr("By time"))])
+        self.session_grouping.set_current(getattr(self.prefs, "sessions_grouping", "workspace"), emit=False)
         self.session_grouping.changed.connect(self.set_sessions_grouping)
         toolbar.addWidget(self.session_grouping)
         self.session_attach_button = make_button(tr('ui.3c1df1893978'), "primary", "terminal", callback=lambda *_: self.attach_session(),

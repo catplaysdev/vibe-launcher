@@ -131,6 +131,62 @@ def session_ids(view):
     return [view.sessions_list.item(r).data(256) for r in range(view.sessions_list.count())]
 
 
+def test_sessions_grouped_by_workspace_then_project(view, monkeypatch):
+    view.store.save("presets", {"id": "old", "name": "Old project", "environment_id": "local", "path": "C:/old"})
+    view.store.save("environments", {"id": "srv", "name": "Server", "kind": "ssh", "ssh_target": "user@server"})
+    view.store.save("workspaces", {"id": "site", "name": "Site", "slots": [{"preset_id": "project", "kind": "agent"}]})
+    rows = (("a", "project", "running", "2026-10-05T03:00:00+00:00"), ("b", "project", "ended", "2026-10-05T02:00:00+00:00"),
+            ("c", "old", "ended", "2026-10-05T04:00:00+00:00"), ("d", "", "unknown", "2026-10-05T01:00:00+00:00"))
+    for sid, preset, status, when in rows:
+        view.store.save("sessions", {"id": sid, "preset_id": preset, "account_id": "user", "environment_id": "srv" if sid == "a" else "local",
+                                     "name": sid, "path": "C:/p", "status": status, "updated_at": when})
+    view.reload()
+    assert view.prefs.sessions_grouping == "workspace"
+    # Workspace > project > terminals: live work first, a project with only finished work is folded, nothing is lost.
+    assert headings(view) == ["ws:site", "site/project", "ws:@none", "@none/__other__", "@none/old"]
+    assert [i for i in session_ids(view) if i] == ["a", "b", "d"]
+    view._toggle_session_group("@none/old")
+    assert "c" in session_ids(view)
+    view._toggle_session_group("site/project")
+    assert "a" not in session_ids(view)
+    view._toggle_session_group("ws:@none")
+    assert headings(view) == ["ws:site", "site/project", "ws:@none"] and not [i for i in session_ids(view) if i]
+    view.session_filter.set_current("finished")            # asking for finished work unfolds it
+    view._session_collapsed.clear()
+    view._render_sessions()
+    assert set(i for i in session_ids(view) if i) == {"b", "c"}
+    view.session_filter.set_current("all")
+    cleared = []
+    monkeypatch.setattr(view, "_confirm", lambda *a, **k: True)
+    monkeypatch.setattr(view, "_delete_many", lambda kind, ids: cleared.extend(ids))
+    view.clean_finished_sessions("project")
+    assert cleared == ["b"]                                 # only that project's finished work
+    recalled = []
+    monkeypatch.setattr(view, "restore_project", recalled.append)
+    view._session_collapsed.clear()
+    view._render_sessions()
+    project = view.sessions_list.itemWidget(view.sessions_list.item(1))
+    [b for b in project.findChildren(QPushButton) if b.text() == ui.tr("Recall all")][0].click()
+    assert recalled == ["project"]
+    space = view.sessions_list.itemWidget(view.sessions_list.item(0))
+    [b for b in space.findChildren(QPushButton) if b.text() == ui.tr("Switch")][0].click()
+    assert view.workspace.workspace_id == "site" and view.current_page() == "workspace"
+    view.session_grouping.set_current("time")
+    assert not headings(view) and UiPrefs(view.prefs.path).sessions_grouping == "time"
+
+
+def test_an_open_terminal_puts_its_session_under_that_workspace(view):
+    view.store.save("workspaces", {"id": "site", "name": "Site", "slots": [{"preset_id": "project", "kind": "agent"}]})
+    view.reload()
+    view.open_terminal("project", "shell")                  # opened on the default desktop, though the project is also in Site
+    tab = view.workspace.current_tabs()[0]
+    view.store.save("sessions", {"id": tab.info.session_id, "preset_id": "project", "account_id": "user", "environment_id": "local",
+                                 "name": "shell", "path": "C:/p", "status": "running"})
+    view.reload()
+    view.show_page("sessions")
+    assert headings(view)[:2] == ["ws:", "/project"]
+
+
 def headings(view):
     from vibe_launcher.kit import GROUP_ROLE
     return [view.sessions_list.item(r).data(GROUP_ROLE) for r in range(view.sessions_list.count())
@@ -153,39 +209,3 @@ def test_sessions_filter_and_single_toolbar(view):
     assert view.sessions_list.count() == 3
 
 
-def test_sessions_grouped_by_project(view, monkeypatch):
-    view.store.save("presets", {"id": "old", "name": "Old project", "environment_id": "local", "path": "C:/old"})
-    view.store.save("environments", {"id": "srv", "name": "Server", "kind": "ssh", "ssh_target": "user@server"})
-    rows = (("a", "project", "running", "2026-10-05T03:00:00+00:00"), ("b", "project", "ended", "2026-10-05T02:00:00+00:00"),
-            ("c", "old", "ended", "2026-10-05T04:00:00+00:00"), ("d", "", "unknown", "2026-10-05T01:00:00+00:00"))
-    for sid, preset, status, when in rows:
-        view.store.save("sessions", {"id": sid, "preset_id": preset, "account_id": "user", "environment_id": "srv" if sid == "a" else "local",
-                                     "name": sid, "path": "C:/p", "status": status, "updated_at": when})
-    view.reload()
-    assert view.prefs.sessions_grouping == "project"
-    # Live work first; a project with only finished work is folded; work without a project is not lost.
-    assert headings(view) == ["project", "__other__", "old"]
-    assert [i for i in session_ids(view) if i] == ["a", "b", "d"]
-    view._toggle_session_group("old")
-    assert "c" in session_ids(view)
-    view._toggle_session_group("project")
-    assert "a" not in session_ids(view)
-    view.session_filter.set_current("finished")            # asking for finished work unfolds it
-    view._session_collapsed.clear()
-    view._render_sessions()
-    assert set(i for i in session_ids(view) if i) == {"b", "c"}
-    view.session_filter.set_current("all")
-    cleared = []
-    monkeypatch.setattr(view, "_confirm", lambda *a, **k: True)
-    monkeypatch.setattr(view, "_delete_many", lambda kind, ids: cleared.extend(ids))
-    view.clean_finished_sessions("project")
-    assert cleared == ["b"]                                 # only that project's finished work
-    recalled = []
-    monkeypatch.setattr(view, "restore_project", recalled.append)
-    view._session_collapsed.clear()
-    view._render_sessions()
-    header = view.sessions_list.itemWidget(view.sessions_list.item(0))
-    [b for b in header.findChildren(QPushButton) if b.text() == ui.tr("Recall all")][0].click()
-    assert recalled == ["project"]
-    view.session_grouping.set_current("time")
-    assert not headings(view) and UiPrefs(view.prefs.path).sessions_grouping == "time"

@@ -92,7 +92,7 @@ class UiPrefs:
         self.composer_position = "bottom"
         self.toast_anchor: list[float] | None = None   # [x_ratio, y_ratio] in the window; None = default corner
         self.update_check = True                # look for newer launcher versions in the background
-        self.sessions_grouping = "project"      # Sessions page: grouped by "project" or one list by "time"
+        self.sessions_grouping = "workspace"    # Sessions page: workspace > project > terminal, or one list by "time"
         self._load()
 
     def _load(self) -> None:
@@ -139,7 +139,7 @@ class UiPrefs:
             self.shortcuts = {}
         self.toast_anchor = valid_anchor(data.get("toast_anchor"))
         self.update_check = data.get("update_check", True) is not False
-        self.sessions_grouping = "time" if data.get("sessions_grouping") == "time" else "project"
+        self.sessions_grouping = "time" if data.get("sessions_grouping") == "time" else "workspace"
 
     def snapshot(self) -> dict:
         """The known preferences in their stored (JSON) form."""
