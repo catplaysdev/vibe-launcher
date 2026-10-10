@@ -2678,7 +2678,7 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         record = self._selected_record(kind)
         if not record:
             return
-        if kind == "environments" and record.get("kind") == "local":
+        if kind == "environments" and record.get("id") == "local":
             self._notice(tr('ui.0bd9bdc7d37d'))
             return
         extra = (tr('ui.39dfcb3f7b46') if kind == "environments" and record.get("kind") == "ssh" else

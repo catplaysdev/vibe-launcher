@@ -312,11 +312,15 @@ def _node_version(name: str) -> tuple[int, ...]:
 def user_tool_dirs(home: Path | None = None, *, uid: int | None = None) -> list[str]:
     """Per-user locations where CLIs are commonly installed but that an SSH non-interactive PATH usually lacks.
 
-    Searched *after* the system PATH, so system installs win. Only directories owned by the current user and not
-    group/world-writable qualify, which keeps another account's or a shared directory's binary from being picked.
+    Searched *after* the system PATH, so system installs win. Windows uses known native installer locations.
+    On Unix, only directories owned by the current user and not group/world-writable qualify.
     """
     if WINDOWS:
-        return []
+        home = home or Path.home()
+        local = Path(os.environ.get("LOCALAPPDATA") or home / "AppData" / "Local")
+        # Desktop shortcuts can inherit an old PATH after a native CLI install.
+        found = [home / ".local" / "bin", local / "Programs" / "OpenAI" / "Codex" / "bin"]
+        return [str(path) for path in found if path.is_absolute() and path.is_dir()]
     if uid is None:
         if not hasattr(os, "getuid"):
             return []
@@ -1799,9 +1803,8 @@ def browse_listing(path: str) -> dict:
 def perform(request: dict, root: Path) -> int:
     validate_request(request)
     private_dir(root)
-    if not WINDOWS:
-        # Make CLIs installed under the user's home discoverable (and their `node`) without asking users to edit PATH.
-        os.environ["PATH"] = augmented_path()
+    # Desktop shortcuts and non-interactive SSH can inherit a PATH without per-user installs.
+    os.environ["PATH"] = augmented_path()
     action = request["action"]
     if action in {"github", "harness", "import-settings", "import-history"}:
         if action == "github":

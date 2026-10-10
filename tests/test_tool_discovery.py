@@ -34,10 +34,41 @@ def test_user_tool_dirs_list_common_locations_newest_node_first(tmp_path, monkey
     assert not any(".cargo" in d for d in dirs), "directories that do not exist are skipped"
 
 
-def test_user_tool_dirs_is_empty_on_windows(tmp_path, monkeypatch):
+def test_windows_native_install_dirs_are_found_without_path(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, "WINDOWS", True)
+    local = tmp_path / "AppData" / "Local"
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
     (tmp_path / ".local/bin").mkdir(parents=True)
-    assert runtime.user_tool_dirs(tmp_path, uid=1) == []
+    codex_bin = local / "Programs" / "OpenAI" / "Codex" / "bin"
+    codex_bin.mkdir(parents=True)
+    assert runtime.user_tool_dirs(tmp_path) == [str(tmp_path / ".local/bin"), str(codex_bin)]
+    assert runtime.user_tool_dirs(tmp_path / "missing") == [str(codex_bin)]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native executable discovery")
+def test_windows_perform_discovers_native_clis_with_stale_path(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    local = home / "AppData" / "Local"
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    for directory, name in [(home / ".local/bin", "claude"),
+                            (local / "Programs/OpenAI/Codex/bin", "codex")]:
+        directory.mkdir(parents=True)
+        (directory / (name + ".exe")).write_bytes(b"native placeholder")
+    found = []
+    monkeypatch.setattr(runtime, "doctor", lambda *a: found.extend(runtime.trusted_executable(t) for t in ("codex", "claude")))
+    request = {"action": "doctor", "environment_id": "local", "nonce": "n"}
+    runtime.perform(request, tmp_path / "data")
+    assert [Path(p).name for p in found] == ["codex.exe", "claude.exe"]
+
+
+def test_windows_discovery_ignores_relative_install_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, "WINDOWS", True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LOCALAPPDATA", "relative")
+    (tmp_path / "relative/Programs/OpenAI/Codex/bin").mkdir(parents=True)
+    assert runtime.user_tool_dirs(tmp_path / "home") == []
 
 
 def test_augmented_path_keeps_system_directories_first_without_duplicates():
