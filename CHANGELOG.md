@@ -1,13 +1,34 @@
 # Changelog
 
 版本號唯一來源是 `pyproject.toml` 的 `version`；發佈時在 `main` 打 `v<版本>` tag（例如 `v0.2.0`）。
-每個版本一節：`## [x.y.z] - YYYY-MM-DD`，條列重點；launcher 的更新畫面會顯示該節的每一條。
+每個版本一節：`## [x.y.z] - YYYY-MM-DD`，先條列中文重點，再以 `### English` 小節條列相同內容的英文；更新資訊依系統顯示語言選擇，繁體中文系統顯示中文，其餘一律英文，並可複製兩種語言的全文。
 目前仍在開發階段，不保留舊版相容，設定或資料庫欄位的移除直接寫在條列中即可。
+
+## [Unreleased]
+
+- 新增：關閉視窗時可縮到系統匣（設定 → 一般 → 視窗，預設關閉）；終端與 SSH 工作持續執行，可從匣圖示重新開啟或結束。
+- 新增：更新改在專屬視窗顯示進度：四個步驟、下載大小、備份位置、這次更新的內容；安裝程式接手後顯示不確定進度、已經過時間與說明，不再卡在空白畫面。
+- 新增：更新內容提供中英文兩種語言，依系統顯示語言選擇：繁體中文系統顯示中文，其餘一律英文；更新視窗與「關於與更新」可複製中英文全文，進度訊息依介面語言顯示。
+- 修正：程式、安裝程式與工作列圖示與程式內一致（米白圓形底盤），不再是白色方塊。
+- 修正：更新 helper 失敗不再被進度檔誤報為成功，重複按更新不會啟動多個下載；安裝程式接手後不再跳出第二次終端關閉確認。
+
+### English
+
+- New: closing the window can minimise it to the system tray (Settings → General → Window, off by default); terminals and SSH work keep running, and the tray icon reopens or quits the launcher.
+- New: updates show their progress in their own window: four steps, download size, backup location and what the update contains. Once the installer takes over it shows an indeterminate bar, elapsed time and an explanation instead of a blank screen.
+- New: update notes come in Chinese and English. Traditional Chinese system display languages show Chinese; all other systems show English. Both update screens can copy both languages; progress messages follow the interface language.
+- Fix: the program, installer and taskbar icons match the in-app logo (cream round plate) instead of a white square.
+- Fix: helper failures override success reported by the progress file, repeated update clicks reuse the active download, and installer handoff no longer opens a second terminal-close confirmation.
 
 ## [0.2.1] - 2026-10-11
 
 - 修正：Windows 桌面啟動的打包版繼承舊 PATH 時，會補查 Claude 與 Codex 的使用者原生安裝目錄；偵測與啟動使用相同搜尋路徑。
 - 修正：自建 local 環境可在確認並通過相依性檢查後刪除，只有內建的預設本機環境不可刪除。
+
+### English
+
+- Fix: a packaged build started from the Windows desktop with an old PATH now also searches the user's native Claude and Codex install folders; detection and launching use the same search path.
+- Fix: custom local environments can be deleted after confirmation and the dependency check; only the built-in default local environment cannot be deleted.
 
 ## [0.2.0] - 2026-10-10
 
@@ -34,6 +55,32 @@
 - 終端標題列新增「重新載入」；重新載入與輸入列按 Enter 送出前會確認，可勾選「不再詢問」，並可在「設定 → 終端 → 確認通知」改回。
 - 新增介面設定：`workspace_icons`、`default_workspace_name`、`default_workspace`、`last_workspace`、`confirm_reload`、`confirm_send`（`ui-state.json`）。
 - 修正：在某個環境檢查 Codex／Claude 版本找到新版後，其他環境仍顯示舊的檢查結果；現在各環境都會以任何一次檢查看到的最新版比較，落後的直接標示「可更新」。
+
+### English
+
+- Workspaces are named, switchable multi-project desktops that keep their terminals, layout and selection; switching no longer creates new jobs and reconnecting jumps to the existing terminal.
+- The per-run records in the project drawer are now called "sessions", separate from multi-project workspaces.
+- Codex and Claude now pick up the local or remote user's global skills, plugins and conversations on every launch; project-level settings are still read by the official CLI and multi-account sign-in credentials stay isolated.
+- Claude plugins load according to the current user/project enablement; Codex uses its native SQLite index when present, including database-backed conversation history.
+- Stale extension copies whose source was deleted and that the user never changed are removed automatically; conversations only gain identical new messages and a diverged local continuation is never overwritten.
+- The PyInstaller cache is cleaned before packaging and the self-test compares the running program with the runtime sources, so old and new code are never mixed.
+- Fix: a failed sync of skills, settings or conversations at launch (links in the profile, a BOM in a settings file, 0644 permissions on a remote) no longer stops Codex or Claude from opening; files are skipped one by one with a hint in the terminal and links in the profile are never read, written or deleted.
+- The launch sync only re-reads changed skills and conversations instead of scanning everything each time.
+- Fix: local sessions still showed "running" after the terminal or launcher closed, a crash or a reboot; start-up now corrects Home, projects and workspaces, a reused PID is no longer mistaken for a live process, and with only local terminals the close prompt no longer mentions tmux.
+- Every workspace (including the default one) can be renamed and given an icon; they show in the workspace menu, the command palette and Home.
+- Home has a new Workspaces card with each workspace's project count and open/running terminals; one click switches.
+- The project page shows which workspace a project belongs to and can switch to it; new "Open in workspace…" and a workspace filter; the sessions drawer is grouped by workspace.
+- A project's "running" state now follows the terminals actually open in the workspace, matching the counts; tmux work on SSH without an open terminal shows as "running in background".
+- "Resume" returns to the project's workspace: if the terminal is already open it switches there, otherwise it brings back that workspace's terminals (tmux reattached; Codex/Claude continue the last conversation with `--continue` / `resume --last`).
+- Workspaces are saved as terminals open and close (the default one too), so a forced close loses nothing; the next start returns to the last workspace and "Restore N terminals" brings them back in one click without starting anything automatically. Stopped or failed local session records are no longer kept.
+- After a restart, projects waiting in a workspace are marked "Can resume" and follow the resume flow; resuming never reopens an open terminal, failed terminals stay for retry without clearing the layout; fixes the default workspace layout being cleared on restart (and external terminal mode too); SSH direct (non-tmux) work with no terminal shows "state unknown" instead of "running in background"; Claude plugin enablement is read from the project folder only.
+- The "Can resume" button on Home's recent projects is now "Resume"; when a local terminal is reloaded the replaced session is recorded as ended immediately. README, user guide and the manual acceptance checklist are updated (multi-language UI, workspace restore, test commands).
+- No more compatibility with older builds during development: database migrations and read-only mode, the account fields `share_extensions` / `import_history` / `manual_import_notice`, version-1 settings import, preserving unknown `ui-state.json` / `settings.json` fields and the pre-update "settings changes" reminder are removed; unknown database fields are dropped on the next save.
+- The Sessions page is grouped Workspace › Project › Terminal (instead of by project): open terminals sit in their workspace, the rest follow their project's workspace, and projects without a workspace come last; workspace headers switch to it. The `sessions_grouping` setting now takes `workspace` / `time`.
+- Branching follows Git Flow (main for releases, develop and hotfix for testing, `feat/dev_*` / `fix_*` stay local); a `.githooks/pre-push` hook blocks pushing work branches and CI runs on pushes to main/develop/hotfix and on PRs to main.
+- Terminal title bar gets "Reload"; reload and sending with Enter in the input bar ask first, with a "don't ask again" box that can be changed in Settings → Terminal → Confirmations.
+- New interface settings: `workspace_icons`, `default_workspace_name`, `default_workspace`, `last_workspace`, `confirm_reload`, `confirm_send` (`ui-state.json`).
+- Fix: after checking Codex/Claude versions in one environment and finding a newer one, other environments kept showing old results; every environment now compares against the newest version seen by any check, and ones that fall behind show "Update available".
 
 ## [0.1.0] - 2026-10-06
 

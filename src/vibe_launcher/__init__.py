@@ -7,11 +7,11 @@ from pathlib import Path as _Path
 def _detect_version() -> str:
     """The single source is pyproject.toml; installed metadata first, then the checkout's pyproject."""
     try:
-        from importlib.metadata import PackageNotFoundError, version
-        try:
-            return version("vibe-launcher")
-        except PackageNotFoundError:
-            pass
+        from importlib.metadata import distributions
+        # An update that leaves an older vibe_launcher-*.dist-info behind must not make the app report the old version.
+        found = [d.version for d in distributions(name="vibe-launcher") if d.version]
+        if found:
+            return max(found, key=lambda v: tuple(int(n) if n.isdigit() else 0 for n in _re.split(r"[.+-]", v)[:3]))
     except ImportError:  # pragma: no cover - stdlib on supported Pythons
         pass
     try:

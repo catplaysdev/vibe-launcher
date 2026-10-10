@@ -112,7 +112,11 @@ size, `Ctrl+Shift+Space` keyboard navigation. All shortcuts can be changed in **
 - **Customisation**: 8 colour themes and accent colours, separate interface and terminal fonts, interface scale (80–200%), English / 繁體中文 / 简体中文 / 日本語 / 한국어 / Deutsch / Español UI,
   CLI plugin manifests in `settings.json`.
 - **Safe updates**: the installed app updates from GitHub Releases (checksum verified); a git checkout compares tags
-  and runs `git pull --ff-only` + `uv sync`. Both back up the database and settings first.
+  and runs `git pull --ff-only` + `uv sync`. Both back up the database and settings first. A progress window shows each step,
+  the download size and what the update contains (Chinese on Traditional Chinese systems, English on all others;
+  both languages can be copied). Updates reuse the active operation and honor helper failures; installer handoff
+  closes terminals already confirmed at the start without a second prompt.
+- **System tray**: optionally keep the launcher running in the tray when its window is closed (Settings › General › Window).
 
 <table>
   <tr>

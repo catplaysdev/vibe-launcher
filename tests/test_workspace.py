@@ -949,6 +949,37 @@ def test_closing_with_only_local_terminals_says_so_and_ends_their_sessions(windo
     assert store.get("sessions", tab.info.session_id)["status"] == "ended"
 
 
+def test_closing_to_the_tray_keeps_terminals_and_quit_uses_the_normal_close(window, monkeypatch):
+    from PySide6.QtGui import QCloseEvent
+
+    from vibe_launcher import tray as tray_module
+    view, store, service = window
+    view.open_terminal("p1", "agent")
+    monkeypatch.setattr(tray_module, "available", lambda: True)
+    monkeypatch.setattr(tray_module.TrayIcon, "show", lambda self: None)
+    monkeypatch.setattr(tray_module.TrayIcon, "showMessage", lambda self, *a, **k: None)
+    asked = []
+    monkeypatch.setattr(view, "_confirm", lambda title, message, **kw: asked.append(message) or True)
+    view.prefs.minimize_to_tray = True
+    event = QCloseEvent()
+    view.closeEvent(event)
+    assert not event.isAccepted() and not asked and view.workspace.running_count() == 1, "hidden, nothing ended or asked"
+    view._quit_from_tray()                  # the tray's Quit goes through the usual confirmation and shutdown
+    assert asked and view.workspace.tabs() == []
+
+
+def test_closing_without_the_tray_option_or_a_tray_is_unchanged(window, monkeypatch):
+    from PySide6.QtGui import QCloseEvent
+
+    from vibe_launcher import tray as tray_module
+    view, store, service = window
+    monkeypatch.setattr(tray_module, "available", lambda: False)
+    view.prefs.minimize_to_tray = True      # no tray on this platform: fall back to quitting
+    event = QCloseEvent()
+    view.closeEvent(event)
+    assert event.isAccepted()
+
+
 def test_the_workspace_is_a_page_with_a_shortcut(window):
     view, store, service = window
     assert view.PAGES[1] == "workspace" and "workspace" in view.nav_buttons

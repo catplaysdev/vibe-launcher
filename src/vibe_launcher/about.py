@@ -4,12 +4,12 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from . import icons
+from . import icons, updates
 from .i18n import tr
-from .kit import dispose_widget, label, make_button, set_tone
+from .kit import dispose_widget, label, later, make_button, set_tone
 from .theme import C, S, theme_bus
 
 SPONSOR_URL = "https://buymeacoffee.com/catplaysdev"
@@ -27,17 +27,29 @@ class ReleaseCard(QFrame):
         head.addWidget(label(f"v{release.get('version', '')}", "subsection"))
         head.addWidget(label(release.get("date", ""), "meta"))
         head.addStretch(1)
+        self.copy_button = make_button(tr("Copy"), "ghost", "copy", small=True, tip=tr("Copy this version's notes in both languages"),
+                                       callback=lambda: copy_notes([release], self.copy_button))
+        head.addWidget(self.copy_button)
         layout.addLayout(head)
-        for note in release.get("notes", [])[:20]:
+        for note in updates.notes_for(release)[:20]:
             layout.addWidget(label("• " + note, wrap=True))
         for child in self.findChildren(QLabel):
             child.setTextFormat(Qt.TextFormat.PlainText)
+            child.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+
+def copy_notes(releases: list[dict[str, Any]], button) -> None:
+    """Put the notes (Chinese and English) on the clipboard so they can be pasted into a translator."""
+    QGuiApplication.clipboard().setText(updates.release_text(releases))
+    button.setText(tr("Copied"))
+    later(button, 1500, lambda: button.setText(tr("Copy")))
 
 
 class AboutPanel(QWidget):
     def __init__(self, window, parent: QWidget | None = None):
         super().__init__(parent)
         self.window = window
+        self._shown: list[dict[str, Any]] = []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(S.md)
@@ -60,6 +72,8 @@ class AboutPanel(QWidget):
         self.update_button = make_button(tr("Update…"), "primary", "download", callback=window.apply_update)
         row.addWidget(self.check_button)
         row.addWidget(self.update_button)
+        self.copy_all = make_button(tr("Copy all notes"), "ghost", "copy", callback=lambda: copy_notes(self._shown, self.copy_all))
+        row.addWidget(self.copy_all)
         row.addStretch(1)
         layout.addLayout(row)
         layout.addWidget(label(tr("Your settings are backed up before updating and existing values are never changed."), "meta", wrap=True))
@@ -89,7 +103,7 @@ class AboutPanel(QWidget):
 
     def refresh(self, *_) -> None:
         report = self.window.update_report() or {}
-        current = report.get("current") or self.window.app_version()
+        current = self.window.app_version()          # what is installed, not what an earlier check recorded
         self.version.setText(tr("Version {version}", version=current))
         busy = bool(getattr(self.window, "_update_busy", False))
         status = report.get("status")
@@ -109,6 +123,8 @@ class AboutPanel(QWidget):
         set_tone(self.status, tone)
         self.check_button.setEnabled(not busy)
         self.update_button.setVisible(bool(releases))
+        self._shown = releases
+        self.copy_all.setVisible(len(releases) > 1)
         while self.releases.count():
             item = self.releases.takeAt(0)
             if item.widget() is not None:
