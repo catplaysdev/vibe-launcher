@@ -34,6 +34,24 @@ def run() -> dict:
     from .store import Store
     from .ui import MainWindow
     with tempfile.TemporaryDirectory() as folder:
+        if runtime.WINDOWS:
+            # Verify discovery without the PATH a terminal or installer supplies.
+            home = Path(folder) / "native-home"
+            native_bin = home / ".local" / "bin"
+            native_bin.mkdir(parents=True)
+            for tool in ("codex", "claude"):
+                (native_bin / (tool + ".exe")).write_bytes(b"discovery-only")
+            previous_path = os.environ.get("PATH")
+            try:
+                os.environ["PATH"] = runtime.augmented_path("", runtime.user_tool_dirs(home))
+                checks["native_cli_discovery"] = all(
+                    Path(runtime.trusted_executable(tool)) == native_bin / (tool + ".exe")
+                    for tool in ("codex", "claude"))
+            finally:
+                if previous_path is None:
+                    os.environ.pop("PATH", None)
+                else:
+                    os.environ["PATH"] = previous_path
         os.environ["VIBE_LAUNCHER_HOME"] = folder
         store = Store(Path(folder) / "vibe-launcher.sqlite3")
         window = MainWindow(store, LauncherService(store))

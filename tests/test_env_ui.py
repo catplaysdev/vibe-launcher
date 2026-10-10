@@ -348,6 +348,22 @@ def test_delete_environment_requires_confirmation_and_clears_secret(window, monk
     assert gpu["id"] not in rows(view)
 
 
+def test_custom_local_environment_can_be_deleted_after_confirmation(window, monkeypatch):
+    view, store, *_ = window
+    local = store.save("environments", {"name": "Custom local", "kind": "local", "ssh_target": ""})
+    view.reload()
+    view.env_page.select(local["id"])
+    asked = []
+    monkeypatch.setattr(view, "_confirm", lambda *a, **kw: asked.append(kw) or False)
+    view.delete_record("environments")
+    assert asked and store.get("environments", local["id"])
+    monkeypatch.setattr(view, "_confirm", lambda *a, **kw: True)
+    view.delete_record("environments")
+    with pytest.raises(KeyError):
+        store.get("environments", local["id"])
+    assert store.get("environments", "local")
+
+
 def test_builtin_local_environment_cannot_be_deleted(window, monkeypatch):
     view, store, *_ = window
     view.env_page.select("local")
