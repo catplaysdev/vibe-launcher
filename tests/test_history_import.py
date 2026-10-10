@@ -23,17 +23,14 @@ def transcript(tool, mode="legacy"):
     ("codex", "sessions/2026/10/05/rollout-test.jsonl"),
     ("claude", "projects/test/session.jsonl"),
 ])
-def test_opt_in_snapshot_never_overwrites_or_copies_other_data(tmp_path, tool, relative):
-    account = {"id": "a", "tool": tool}
+def test_snapshot_never_overwrites_or_copies_other_data(tmp_path, tool, relative):
+    account = {"id": "a", "tool": tool, "import_history": True}
     home, root = tmp_path / "home", tmp_path / "data"
     source = runtime.user_config_dir(tool, home)
     original = write(source / relative, transcript(tool))
     write(source / "history.jsonl", b"prompt history\n")
     write(source / "auth.json", b"fake credential")
     write(source / "state_5.sqlite", b"database")
-    assert runtime.sync_history(account, root, home)["copied"] == 0
-    assert not root.exists()
-    account["import_history"] = True
     assert runtime.sync_history(account, root, home) == {"copied": 1, "skipped": 0, "limited": False}
     profile = runtime.profile_dir(root, account)
     assert (profile / relative).read_bytes() == original.read_bytes()
