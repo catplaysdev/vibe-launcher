@@ -90,6 +90,10 @@ uv run vibe-launcher
 
 遠端 Python 需包含標準庫 `lzma`，用於解壓縮啟動腳本；腳本仍會經 SHA-256 校驗。
 
+Windows 本機 CLI 偵測與啟動先使用 PATH，再補查 `%USERPROFILE%/.local/bin`（Claude 原生安裝）與 `%LOCALAPPDATA%/Programs/OpenAI/Codex/bin`（Codex 原生安裝），因此打包版從桌面啟動、繼承到安裝前的 PATH 時也能找到這些原生 `.exe`。其他安裝位置仍需在 PATH；`.cmd`／`.bat` 包裝器不會被執行。
+
+自建的 local 環境可從環境選單刪除，需先確認，並解除專案、GitHub 帳號與仍存活工作階段等相依性；內建 ID 為 `local` 的預設本機環境不能刪除。刪除環境紀錄不會移除本機 CLI 或專案資料夾。
+
 建立專案資料夾內的 Windows 捷徑：
 
 ```powershell
