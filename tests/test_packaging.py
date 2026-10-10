@@ -274,8 +274,8 @@ def test_changelog_notes_come_in_two_languages_and_can_be_copied():
     assert text.startswith("v0.3.0 (2026-10-12)") and "- 中文一" in text and "[English]" in text and "- English two" in text
     shipped = updates.parse_changelog((Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8"),
                                       include_unreleased=True)
-    assert shipped["Unreleased"]["notes"] and shipped["Unreleased"]["notes_en"]
-    assert shipped["0.2.1"]["notes_en"], "the latest release carries English notes"
+    latest = shipped.get("Unreleased") or shipped[updates.current_version()]
+    assert latest["notes"] and latest["notes_en"], "the current release carries Chinese and English notes"
 
 
 def test_the_update_window_follows_the_helper_progress_file(qapp, qtbot, tmp_path):
