@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import runtime
@@ -57,6 +58,81 @@ def process_alive(pid: int) -> bool:
         return bool(kernel.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
     finally:
         kernel.CloseHandle(handle)
+
+
+def process_started(pid: int) -> datetime | None:
+    """When the running local process ``pid`` was created (UTC); None when that cannot be read (gone, not ours, not Windows)."""
+    if os.name != "nt" or type(pid) is not int or pid <= 0:
+        return None
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        code = wintypes.DWORD()
+        times = [wintypes.FILETIME() for _ in range(4)]
+        if not kernel.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 259:
+            return None
+        if not kernel.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+            return None
+        ticks = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime     # 100 ns steps since 1601-01-01 UTC
+        return datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=ticks // 10)
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def runner_alive(pid, recorded_at: str, *, local: bool, queued: bool = False) -> bool:
+    """Is ``pid`` still the runner that last wrote this session? Windows reuses PIDs, so a process that started after the
+    record was written (including every process after a reboot) is someone else. A queued record is written just before
+    its runner starts, so it gets a longer allowance."""
+    if not process_alive(pid):
+        return False
+    if os.name != "nt":
+        return True
+    started = process_started(pid)
+    if started is None:
+        return not local      # a local runner is always this user's own child; one we cannot inspect is not ours
+    try:
+        recorded = datetime.fromisoformat(str(recorded_at).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if recorded.tzinfo is None:
+        recorded = recorded.replace(tzinfo=timezone.utc)
+    return started <= recorded + timedelta(seconds=120 if queued else 5)
+
+
+def end_local_record(root: Path, session_id: str) -> None:
+    """Mark the worker's own record (``sessions/<id>.json``) of a local session that is known to be over."""
+    path = runtime.session_path(root, session_id)
+    try:
+        if path.is_file():
+            record = json.loads(runtime.read_private(path))
+            if isinstance(record, dict) and record.get("status") not in {"ended", "failed"}:
+                runtime.write_json(path, {**record, "status": "ended", "updated_at": runtime.now()})
+    except (OSError, ValueError):
+        pass
+
+
+def end_stale_records(paths: list[Path], live_ids: set[str], local_environments: set[str]) -> int:
+    """Worker records of local sessions that are no longer live in the database: their process is gone with the terminal."""
+    ended = 0
+    for path in paths:
+        try:
+            record = json.loads(runtime.read_private(path))
+            if (isinstance(record, dict) and record.get("environment_id") in local_environments
+                    and record.get("session_id") not in live_ids and record.get("status") not in {"ended", "failed"}):
+                runtime.write_json(path, {**record, "status": "ended", "updated_at": runtime.now()})
+                ended += 1
+        except (OSError, ValueError):
+            continue
+    return ended
 
 
 def remember_runner(store: Store, request: dict) -> None:

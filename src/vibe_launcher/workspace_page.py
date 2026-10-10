@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from PySide6.QtCore import QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QPainter
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QScrollArea,
+    QAbstractItemView, QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QScrollArea,
     QSizePolicy, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QVBoxLayout, QWidget,
 )
 
@@ -43,6 +43,8 @@ TOOL_LABEL = {"codex": "Codex", "claude": "Claude", "shell": tr("Terminal")}
 # their terminal; a failure keeps it so the output can be read.
 BACKGROUND_ACTIONS = {"github", "harness", "import-settings", "import-history", "doctor", "ssh-settings", "check-tools",
                       "refresh", "stop", "quota"}
+WORKSPACE_GLYPH = "briefcase"          # a desktop's icon until the user picks one
+DEFAULT_ICON_KEY = "@default"          # icon key of the unsaved default desktop (saved ids never contain "@")
 
 
 @dataclass
@@ -66,6 +68,7 @@ class TabInfo:
     login_operation: bool = False
     action: str = ""
     terminal_profile: str = ""
+    workspace_id: str = ""
 
     @property
     def background(self) -> bool:
@@ -104,6 +107,7 @@ class TerminalPane(QFrame):
     close_requested = Signal(str)
     switch_requested = Signal(str, object)
     reopen_requested = Signal(str)
+    reload_requested = Signal(str)
     history_requested = Signal(str)
     chord = Signal(str)
 
@@ -132,17 +136,21 @@ class TerminalPane(QFrame):
         self.composer_button = IconButton("keyboard", tr('workspace_page.24d0f3982154'),
                                           size=28, icon_size=15)
         self.switch_button = IconButton("repeat", tr('workspace_page.1a798a19e491'), size=28, icon_size=15)
-        self.history_button = IconButton("refresh", tr("Refresh conversations from your other accounts"), size=28, icon_size=15)
+        self.history_button = IconButton("download", tr("Refresh conversations from this environment"), size=28, icon_size=15)
+        self.reload_button = IconButton("refresh", tr("Reload this terminal"), size=28, icon_size=15)
+        self.reload_button.setVisible(bool(info.preset_id) and info.kind in {"agent", "shell", "attach"})
         self.history_button.setVisible(info.kind == "agent" and info.tool in {"codex", "claude"} and bool(info.preset_id))
         self.detach_button = IconButton("log-out", tr('workspace_page.c1212c4f9120'), size=28, icon_size=15)
         self.close_button = IconButton("x", tr('workspace_page.04b383781c02'), size=28, icon_size=15)
         self.refresh_shortcut_labels()
-        for button in (self.composer_button, self.switch_button, self.history_button, self.detach_button, self.close_button):
+        for button in (self.composer_button, self.switch_button, self.reload_button, self.history_button, self.detach_button,
+                       self.close_button):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             row.addWidget(button)
         self.composer_button.clicked.connect(lambda: self.set_composer_visible(not self.composer_visible(), focus=True))
         self.switch_button.clicked.connect(lambda: self.switch_requested.emit(info.id, self.switch_button))
         self.history_button.clicked.connect(lambda: self.history_requested.emit(info.id))
+        self.reload_button.clicked.connect(lambda: self.reload_requested.emit(info.id))
         self.detach_button.clicked.connect(lambda: self.detach_requested.emit(info.id))
         self.close_button.clicked.connect(lambda: self.close_requested.emit(info.id))
         root.addWidget(head)
@@ -589,6 +597,10 @@ class WorkspacePage(QWidget):
     history_refresh_requested = Signal(str, str, str)   # preset_id, account_id, environment_id
     palette_requested = Signal()
     save_workspace_requested = Signal()
+    new_workspace_requested = Signal()
+    edit_workspace_requested = Signal(str)
+    restore_pending_requested = Signal(str)          # workspace id: bring back last time's terminals
+    reload_requested = Signal(str)                   # tab id, after the user confirmed
     open_workspace_requested = Signal(str)
     delete_workspace_requested = Signal(str)
     layout_changed = Signal(str)
@@ -614,7 +626,15 @@ class WorkspacePage(QWidget):
         self._environments: list[dict] = []
         self._sessions: dict[str, dict] = {}
         self._workspaces: list[dict] = []
+        self.workspace_id = ""
+        self._default_name = ""
+        self._icons: dict[str, dict] = {}
+        self._pending: dict[str, int] = {}
+        self.shutting_down = False
+        self.prefs = None                      # the window's UiPrefs (confirmation switches); None = never ask
         self._confirm: Callable[..., bool] = lambda title, message, **kw: ConfirmDialog.ask(self, title, message, **kw)
+        self._confirm_skippable: Callable[..., tuple[bool, bool]] = (
+            lambda title, message, **kw: ConfirmDialog.ask_skippable(self, title, message, **kw))
 
         root = QVBoxLayout(self)
         root.setSpacing(S.lg)
@@ -628,6 +648,16 @@ class WorkspacePage(QWidget):
         self.palette_button = make_button("Ctrl K", "ghost", "command", tip=tr('workspace_page.a9a49c4d731d'))
         self.palette_button.clicked.connect(self.palette_requested)
         self.header.add_action(self.layout_bar)
+        self.workspace_picker = QComboBox()
+        self.workspace_picker.setAccessibleName(tr("Switch workspace"))
+        self.workspace_picker.setMinimumWidth(160)
+        self.workspace_picker.setMaximumWidth(260)
+        self.workspace_picker.activated.connect(lambda index: self.open_workspace_requested.emit(self.workspace_picker.itemData(index)))
+        self.header.add_action(self.workspace_picker)
+        self.restore_button = make_button("", "primary", "repeat", tip=tr("Bring back the terminals this workspace had last time"))
+        self.restore_button.clicked.connect(lambda: self.restore_pending_requested.emit(self.workspace_id))
+        self.restore_button.hide()
+        self.header.add_action(self.restore_button)
         self.header.add_action(self.workspace_button)
         self.header.add_action(self.palette_button)
         root.addWidget(self.header)
@@ -678,12 +708,87 @@ class WorkspacePage(QWidget):
         self.right = QStackedWidget()
         self.right.addWidget(self.empty)
         self.right.addWidget(self.area)
+        self._areas: dict[str, TerminalArea] = {"": self.area}
         self.splitter.addWidget(self.right)
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setSizes([340, 860])
         root.addWidget(self.splitter, 1)
         self.set_compact(False)
+        self._refresh_workspace_picker()
+
+    def _refresh_workspace_picker(self) -> None:
+        self.workspace_picker.blockSignals(True)
+        self.workspace_picker.clear()
+        for workspace_id in self.desktop_ids():
+            self.workspace_picker.addItem(self.workspace_icon(workspace_id), self.workspace_name(workspace_id), workspace_id)
+        self.workspace_picker.setCurrentIndex(self.workspace_picker.findData(self.workspace_id))
+        self.workspace_picker.blockSignals(False)
+        if self.header.tile is not None:
+            self.header.tile.set_custom(self.icon_entry(self.workspace_id), section_hue("workspace"), WORKSPACE_GLYPH)
+
+    # -- names and icons ------------------------------------------------------------------------
+    def set_identity(self, default_name: str, icons_by_key: dict[str, dict]) -> None:
+        """The default desktop's own name ("" = translated default) and every desktop's icon (see ``icon_key``)."""
+        self._default_name, self._icons = default_name, dict(icons_by_key)
+        self._refresh_workspace_picker()
+
+    @staticmethod
+    def icon_key(workspace_id: str) -> str:
+        return workspace_id or DEFAULT_ICON_KEY
+
+    def icon_entry(self, workspace_id: str) -> dict | None:
+        return self._icons.get(self.icon_key(workspace_id))
+
+    def workspace_icon(self, workspace_id: str) -> QIcon:
+        from . import project_icons
+        return QIcon(project_icons.pixmap(self.icon_entry(workspace_id), 18, hue=section_hue("workspace"), glyph=WORKSPACE_GLYPH))
+
+    def workspace_name(self, workspace_id: str) -> str:
+        if not workspace_id:
+            return self._default_name or tr("Default workspace")
+        record = next((w for w in self._workspaces if w.get("id") == workspace_id), None)
+        return str(record["name"]) if record else tr("Unsaved workspace")
+
+    def desktop_ids(self) -> list[str]:
+        """The default desktop, the saved workspaces, then desktops whose saved record is gone (still open here)."""
+        saved = [str(w["id"]) for w in self._workspaces]
+        return [""] + saved + [w for w in self._areas if w and w not in saved]
+
+    def has_workspace(self, workspace_id: str) -> bool:
+        return workspace_id in self._areas
+
+    def switch_workspace(self, workspace_id: str, layout: str = "tabs") -> None:
+        """Keep each desktop's widgets and processes alive; only change the visible area."""
+        if workspace_id not in self._areas:
+            area = TerminalArea()
+            area.set_mode(layout)
+            self._areas[workspace_id] = area
+            self.right.addWidget(area)
+        self.workspace_id = workspace_id
+        self.area = self._areas[workspace_id]
+        self._active = self.area.active.info.id if self.area.active else None
+        self.layout_bar.set_current(self.area.mode, emit=False)
+        self.right.setCurrentWidget(self.area if self.area.panes else self.empty)
+        self._refresh_workspace_picker()
+        self._sync_restore_button()
+        self._rebuild_rail()
+        if self._active:
+            later(self, 0, lambda: self._focus_active(self._active))
+
+    def name_workspace(self, workspace_id: str) -> None:
+        """Give the current desktop its saved identity without reopening its terminals."""
+        old_id = self.workspace_id
+        for tab in self.current_tabs():
+            tab.info.workspace_id = workspace_id
+        self._areas[workspace_id] = self._areas.pop(old_id)
+        self.switch_workspace(workspace_id)
+
+    def desktop_tabs(self, workspace_id: str) -> list[Tab]:
+        return [tab for tab in self.tabs() if tab.info.workspace_id == workspace_id]
+
+    def current_tabs(self) -> list[Tab]:
+        return self.desktop_tabs(self.workspace_id)
 
     # -- factory ----------------------------------------------------------------------------
     @staticmethod
@@ -698,6 +803,7 @@ class WorkspacePage(QWidget):
     # -- data from the window ---------------------------------------------------------------
     def set_data(self, projects: list[dict], accounts: list[dict], environments: list[dict], workspaces: list[dict]) -> None:
         self._projects, self._accounts, self._environments, self._workspaces = projects, accounts, environments, workspaces
+        self._refresh_workspace_picker()
         self.launcher.set_data(projects, accounts, environments)
         for tab in self.tabs():
             account = next((a for a in accounts if a.get("id") == tab.info.account_id), {})
@@ -747,6 +853,7 @@ class WorkspacePage(QWidget):
         return self.add_terminal(info, terminal)
 
     def add_terminal(self, info: TabInfo, terminal: QWidget) -> Tab:
+        info.workspace_id = self.workspace_id
         if info.background:
             # Repeating a check replaces its earlier, already finished terminal instead of piling up copies.
             for old in [t for t in self._tabs.values() if t.info.background and not t.alive() and not t.closing
@@ -772,6 +879,8 @@ class WorkspacePage(QWidget):
         pane.close_requested.connect(self.close_tab)
         pane.switch_requested.connect(self._switch_menu)
         pane.reopen_requested.connect(self._reopen)
+        pane.reload_requested.connect(self.reload_tab)
+        pane.composer.edit.confirm = lambda text, i=info.id: self._confirm_send(i, text)
         pane.history_requested.connect(lambda i=info.id: self._history_refresh(i))
         pane.chord.connect(self._on_chord)
         restored = False
@@ -826,6 +935,10 @@ class WorkspacePage(QWidget):
         tab = self._tabs.get(tab_id)
         if tab is None:
             return
+        if tab.info.workspace_id != self.workspace_id:
+            self.open_workspace_requested.emit(tab.info.workspace_id)
+            if tab.info.workspace_id != self.workspace_id:
+                return
         self._active = tab_id
         self.area.set_active(tab.pane)
         self.right.setCurrentWidget(self.area)
@@ -844,22 +957,26 @@ class WorkspacePage(QWidget):
             tab.pane.focus_input()
 
     def goto(self, number: int) -> None:
-        if 1 <= number <= len(self._order):
-            self.select(self._order[number - 1])
+        tabs = self.current_tabs()
+        if 1 <= number <= len(tabs):
+            self.select(tabs[number - 1].info.id)
 
     def step(self, delta: int) -> None:
-        if self._order and self._active in self._order:
-            self.select(self._order[(self._order.index(self._active) + delta) % len(self._order)])
+        order = [tab.info.id for tab in self.current_tabs()]
+        if self._active in order:
+            self.select(order[(order.index(self._active) + delta) % len(order)])
 
     def move_tab(self, tab_id: str | None, delta: int) -> None:
-        if tab_id not in self._order:
+        order = [tab.info.id for tab in self.current_tabs()]
+        if tab_id not in order:
             return
-        index = self._order.index(tab_id)
+        index = order.index(tab_id)
         target = index + delta
-        if not 0 <= target < len(self._order):
+        if not 0 <= target < len(order):
             return
-        self._order.insert(target, self._order.pop(index))
-        self.area.panes[:] = [tab.pane for tab in self.tabs()]
+        first, second = self._order.index(tab_id), self._order.index(order[target])
+        self._order[first], self._order[second] = self._order[second], self._order[first]
+        self.area.panes[:] = [tab.pane for tab in self.current_tabs()]
         self.area.relayout()
         self._rebuild_rail()
         self.terminals_changed.emit()
@@ -1033,24 +1150,95 @@ class WorkspacePage(QWidget):
         if tab is None:
             return
         self._order.remove(tab_id)
-        self.area.remove(tab.pane)
+        area = self._areas[tab.info.workspace_id]
+        area.remove(tab.pane)
         tab.terminal.dispose()
         tab.pane.deleteLater()
         if self._active == tab_id:
-            self._active = self._order[-1] if self._order else None
+            self._active = area.active.info.id if area.active else None
             if self._active:
                 self.select(self._active)
-        if not self._order:
+        if not self.current_tabs():
             self.right.setCurrentWidget(self.empty)
         self._rebuild_rail()
         self.terminals_changed.emit()
 
     def shutdown(self) -> None:
-        for tab_id in list(self._order):
-            tab = self._tabs[tab_id]
-            tab.closing = "close"
-            tab.terminal.terminate()
-            self._remove(tab_id)
+        self.shutting_down = True              # the window must not record these removals as the user's arrangement
+        try:
+            for tab_id in list(self._order):
+                tab = self._tabs[tab_id]
+                tab.closing = "close"
+                tab.terminal.terminate()
+                self._remove(tab_id)
+            for area in self._areas.values():
+                self.right.removeWidget(area)
+                dispose_widget(area)
+            self._areas.clear()
+            self.switch_workspace("")
+        finally:
+            self.shutting_down = False
+
+    def place_tab(self, tab_id: str, index: int) -> None:
+        """Put a terminal at ``index`` among the current desktop's terminals (a reloaded one goes back to its place)."""
+        order = [tab.info.id for tab in self.current_tabs()]
+        if tab_id not in order or not 0 <= index < len(order) or order.index(tab_id) == index:
+            return
+        others = [i for i in order if i != tab_id]
+        self._order.remove(tab_id)
+        if index < len(others):
+            self._order.insert(self._order.index(others[index]), tab_id)
+        else:
+            self._order.append(tab_id)
+        self.area.panes[:] = [tab.pane for tab in self.current_tabs()]
+        self.area.relayout()
+        self._rebuild_rail()
+        self.terminals_changed.emit()
+
+    def desktop_layout(self, workspace_id: str) -> str:
+        area = self._areas.get(workspace_id)
+        return area.mode if area is not None else "tabs"
+
+    def set_pending(self, workspace_id: str, count: int) -> None:
+        """Terminals this desktop had last time that have not been brought back yet (offered by the Restore button)."""
+        if count > 0:
+            self._pending[workspace_id] = count
+        else:
+            self._pending.pop(workspace_id, None)
+        self._sync_restore_button()
+
+    def _sync_restore_button(self) -> None:
+        count = self._pending.get(self.workspace_id, 0)
+        self.restore_button.setVisible(count > 0)
+        self.restore_button.setText(tr("Restore {count} terminal(s)", count=count))
+
+    # -- reload and send, with confirmations the user may switch off ------------------------------------------
+    def _ask_once(self, flag: str, title: str, message: str, confirm_text: str) -> bool:
+        if self.prefs is None or not getattr(self.prefs, flag, True):
+            return True
+        confirmed, stop_asking = self._confirm_skippable(title, message, confirm_text=confirm_text)
+        if stop_asking:
+            setattr(self.prefs, flag, False)
+            self.prefs.save()
+        return confirmed
+
+    def reload_tab(self, tab_id: str) -> None:
+        tab = self._tabs.get(tab_id)
+        if tab is None or not tab.info.preset_id:
+            return
+        message = (tr("Reconnect {name}? The work keeps running on the server in tmux.", name=f"{tab.info.project} · {tab.info.title}")
+                   if tab.info.tmux else
+                   tr("Restart {name}? The running program ends and starts again; Codex and Claude continue the last conversation.",
+                      name=f"{tab.info.project} · {tab.info.title}"))
+        if self._ask_once("confirm_reload", tr("Reload terminal"), message, tr("Reload")):
+            self.reload_requested.emit(tab_id)
+
+    def _confirm_send(self, tab_id: str, text: str) -> bool:
+        tab = self._tabs.get(tab_id)
+        name = f"{tab.info.project} · {tab.info.title}" if tab else ""
+        preview = text if len(text) <= 300 else text[:300] + "…"
+        return self._ask_once("confirm_send", tr("Send to the terminal"), tr("Send this to {name}?", name=name) + "\n\n" + preview,
+                              tr("Send"))
 
     def _reopen(self, tab_id: str) -> None:
         tab = self._tabs.get(tab_id)
@@ -1066,7 +1254,7 @@ class WorkspacePage(QWidget):
     # -- rail ---------------------------------------------------------------------------------
     def _rebuild_rail(self) -> None:
         groups: list[tuple[str, list[Tab]]] = []
-        for tab in self.tabs():
+        for tab in self.current_tabs():
             project = tab.info.project or tr('workspace_page.d2909f1647e7')
             if not groups or groups[-1][0] != project:
                 groups.append((project, []))
@@ -1108,9 +1296,10 @@ class WorkspacePage(QWidget):
         self._sync_rail_selection()
 
     def _sync_rail_selection(self) -> None:
-        index = self._order.index(self._active) if self._active in self._order else -1
+        order = [tab.info.id for tab in self.current_tabs()]
+        index = order.index(self._active) if self._active in order else -1
         self.move_up_button.setEnabled(index > 0)
-        self.move_down_button.setEnabled(0 <= index < len(self._order) - 1)
+        self.move_down_button.setEnabled(0 <= index < len(order) - 1)
         self.rail.blockSignals(True)
         for row in range(self.rail.count()):
             if self.rail.item(row).data(Qt.ItemDataRole.UserRole) == self._active:
@@ -1209,27 +1398,32 @@ class WorkspacePage(QWidget):
         self.area.set_mode(mode)
         self.layout_changed.emit(mode)
 
-    def slots(self) -> list[dict]:
-        """The terminals that can be reopened later (those that belong to a saved project)."""
+    def slots(self, workspace_id: str | None = None) -> list[dict]:
+        """The terminals of a desktop (the current one by default) that can be reopened later: those of a saved project."""
         out = []
-        for tab in self.tabs():
-            if tab.info.preset_id and tab.info.kind in {"agent", "shell"}:
-                slot = {"preset_id": tab.info.preset_id, "kind": tab.info.kind}
-                if tab.info.kind == "agent" and tab.info.account_id:
+        for tab in self.desktop_tabs(self.workspace_id if workspace_id is None else workspace_id):
+            if tab.info.preset_id and tab.info.kind in {"agent", "shell", "attach"}:
+                kind = "shell" if tab.info.tool == "shell" else "agent"
+                slot = {"preset_id": tab.info.preset_id, "kind": kind}
+                if kind == "agent" and tab.info.account_id:
                     slot["account_id"] = tab.info.account_id
                 if tab.info.environment_id:
                     slot["environment_id"] = tab.info.environment_id
-                if tab.info.kind == "shell" and tab.info.terminal_profile:
+                if kind == "shell" and tab.info.terminal_profile:
                     slot["terminal_profile"] = tab.info.terminal_profile
                 out.append(slot)
         return out
 
-    def _workspace_menu(self) -> None:
-        actions = [MenuAction(tr('workspace_page.55827e010a9e', v0=f"{w.get('name')}", v1=f"{len(w.get('slots', []))}"), lambda i=w["id"]: self.open_workspace_requested.emit(i), "play")
-                   for w in self._workspaces]
-        actions.append(MenuAction(tr('workspace_page.cb82ec9c831c'), self.save_workspace_requested.emit, "save", enabled=bool(self.slots()),
-                                  separator_before=bool(actions)))
+    def workspace_menu_actions(self) -> list[MenuAction]:
+        editable = not self.workspace_id or any(w.get("id") == self.workspace_id for w in self._workspaces)
+        actions = [MenuAction(tr("New workspace"), self.new_workspace_requested.emit, "plus"),
+                   MenuAction(tr("Edit name and icon…"), lambda: self.edit_workspace_requested.emit(self.workspace_id), "pencil",
+                              enabled=editable),
+                   MenuAction(tr('workspace_page.cb82ec9c831c'), self.save_workspace_requested.emit, "save", separator_before=True)]
         for w in self._workspaces:
             actions.append(MenuAction(tr('workspace_page.c81302856731', v0=f"{w.get('name')}"), lambda i=w["id"]: self.delete_workspace_requested.emit(i), "trash",
                                       danger=True, separator_before=w is self._workspaces[0]))
-        ActionMenu(actions, self.window()).popup_below(self.workspace_button)
+        return actions
+
+    def _workspace_menu(self) -> None:
+        ActionMenu(self.workspace_menu_actions(), self.window()).popup_below(self.workspace_button)

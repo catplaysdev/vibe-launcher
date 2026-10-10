@@ -143,6 +143,13 @@ def test_refresh_still_uses_tmux_for_keep_alive_sessions(tmp_path, monkeypatch):
     assert refresh(root, monkeypatch) == {"k": "running"}
 
 
+def test_a_windows_refresh_never_reports_a_recorded_state_as_live(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, "WINDOWS", True)
+    for name, status in (("r", "running"), ("w", "waiting_auth"), ("d", "detached"), ("e", "ended")):
+        runtime.write_json(runtime.session_path(tmp_path, name), {"session_id": name, "environment_id": "host", "status": status})
+    assert refresh(tmp_path, monkeypatch) == {"r": "unknown", "w": "unknown", "d": "unknown", "e": "ended"}
+
+
 def test_pid_alive_never_signals_a_process_on_windows(monkeypatch):
     monkeypatch.setattr(runtime.os, "kill", lambda *a: pytest.fail("os.kill(pid, 0) terminates processes on Windows"))
     assert runtime.pid_alive(1234) is None

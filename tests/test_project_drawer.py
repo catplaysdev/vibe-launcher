@@ -93,7 +93,7 @@ def test_the_project_row_shows_how_many_are_live(view):
     add(view, "s2", "detached", minutes_ago=2)
     view.reload()
     badge = next(view.project_list.item(i).data(0x0101) for i in range(view.project_list.count()) if view.project_list.item(i).data(0x0100) == "p")
-    assert badge[0] == "運行中 ×2"
+    assert badge[0] == "背景執行 ×2", "no terminal is open for them here: they run in the background on the server"
 
 
 def test_a_project_with_no_workspaces_says_so_and_switching_projects_switches_the_drawer(view):
@@ -141,7 +141,7 @@ def test_a_workspace_that_is_open_offers_to_jump_to_it(view):
             return True
 
     class Info:
-        id, session_id = "tab-1", "s1"
+        id, session_id, workspace_id = "tab-1", "s1", ""
 
     class Tab:
         info = Info()
@@ -151,12 +151,14 @@ def test_a_workspace_that_is_open_offers_to_jump_to_it(view):
         def alive():
             return True
 
+    original_tabs = view.workspace.tabs
     view.workspace.tabs = lambda: [Tab()]
     view.workspace.select = lambda tab_id: setattr(view, "_jumped", tab_id)
     view._refresh_project_drawer()
     assert view.work_drawer.rows()[0].tab_id == "tab-1" and buttons(view, "s1", "switch") and not buttons(view, "s1", "attach")
     buttons(view, "s1", "switch")[0].click()
     assert view._jumped == "tab-1"
+    view.workspace.tabs = original_tabs
 
 
 def test_the_new_work_button_opens_the_project_again(view, monkeypatch):
@@ -223,7 +225,7 @@ def test_the_attach_button_restarts_stopped_workspaces_and_replaces_their_record
     calls = view.service.calls
     assert ("attach", {"session_id": "live"}) in calls
     launch = next(c for c in calls if c[0] == "launch")[1]
-    assert launch == {"preset_id": "p", "environment_id": "gpu", "account_id": "b"}      # same service, account and host
+    assert launch == {"preset_id": "p", "environment_id": "gpu", "account_id": "b", "resume": True}      # same service, account and host
     assert "重新連線 Claude（Alpha）" in asked[0] and "重新開啟 Codex（Beta）" in asked[0]
     ids = {s["id"] for s in view.store.list("sessions")}
     assert "dead" not in ids and "live" in ids and "older" in ids                          # the restarted record was replaced
@@ -234,7 +236,7 @@ def test_nothing_to_bring_back_says_why(view, monkeypatch):
     monkeypatch.setattr(view, "_notice", notes.append)
     select_project(view, "p")
     view.attach_project()
-    assert "還沒有工作區" in notes[-1]
+    assert "還沒有工作階段" in notes[-1]
     add(view, "up", "connecting")
     view.reload()
     view.attach_project()

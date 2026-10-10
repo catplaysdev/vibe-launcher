@@ -199,6 +199,60 @@ def test_a_local_session_whose_terminal_is_gone_is_ended_not_unknown(view, monke
     assert {s["id"]: s["status"] for s in view.store.list("sessions")} == {"l1": "ended", "l2": "ended", "r1": "unknown"}
 
 
+@pytest.mark.skipif(os.name != "nt", reason="process creation times are read on Windows")
+def test_a_reused_pid_does_not_keep_a_local_session_alive(view):
+    root = view.store.path.parent
+    long_ago = "2000-01-01T00:00:00+00:00"
+    add_session(view.store, "l1", "running", env="local", updated=long_ago, runner_pid=os.getpid())   # pid now belongs to us
+    add_session(view.store, "l2", "running", env="local", runner_pid=os.getpid())                      # really ours
+    runtime.write_json(runtime.session_path(root, "l1"), {"session_id": "l1", "environment_id": "local", "status": "running"})
+    view.reload()
+    view._reap_closed_terminals()
+    assert view.store.get("sessions", "l1")["status"] == "ended" and view.store.get("sessions", "l2")["status"] == "running"
+    assert runtime.read_private(runtime.session_path(root, "l1")).count('"ended"') == 1
+    assert runner.runner_alive(os.getpid(), datetime.now(timezone.utc).isoformat(), local=True)
+    assert not runner.runner_alive(os.getpid(), long_ago, local=True)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="process creation times are read on Windows")
+def test_a_runner_that_cannot_be_inspected_counts_only_for_remote_work(view, monkeypatch):
+    add_session(view.store, "l1", "running", env="local", runner_pid=4242)
+    add_session(view.store, "r1", "connecting", runner_pid=4242)
+    monkeypatch.setattr(runner, "process_alive", lambda pid: True)
+    monkeypatch.setattr(runner, "process_started", lambda pid: None)
+    view.reload()
+    view._reap_closed_terminals()
+    assert view.store.get("sessions", "l1")["status"] == "ended" and view.store.get("sessions", "r1")["status"] == "connecting"
+
+
+def test_queued_sessions_get_a_grace_period_then_are_reaped(view, monkeypatch):
+    old = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    add_session(view.store, "fresh", "queued", env="local")
+    add_session(view.store, "stuck-local", "queued", env="local", updated=old)
+    add_session(view.store, "stuck-remote", "queued", updated=old)
+    monkeypatch.setattr(runner, "process_alive", lambda pid: False)
+    view.reload()
+    view._reap_closed_terminals()
+    status = {s["id"]: s["status"] for s in view.store.list("sessions")}
+    assert status == {"fresh": "queued", "stuck-local": "ended", "stuck-remote": "unknown"}
+
+
+def test_startup_ends_stale_local_records_and_redraws_every_page(view, monkeypatch):
+    root = view.store.path.parent
+    add_session(view.store, "l1", "running", env="local", runner_pid=999999)
+    view.reload()
+    assert view.home_page.running.value.text() == "1"
+    runtime.write_json(runtime.session_path(root, "gone"), {"session_id": "gone", "environment_id": "local", "status": "running"})
+    runtime.write_json(runtime.session_path(root, "far"), {"session_id": "far", "environment_id": "gpu", "status": "running"})
+    monkeypatch.setattr(runner, "process_alive", lambda pid: False)
+    monkeypatch.setattr(view, "_toast", lambda *a, **k: None)
+    view._startup_housekeeping()
+    assert not [s for s in view.store.list("sessions") if s["id"] == "l1"], "a finished local run leaves no record"
+    assert view.home_page.running.value.text() == "0", "Home no longer shows the old 'running'"
+    assert '"ended"' in runtime.read_private(runtime.session_path(root, "gone"))
+    assert '"running"' in runtime.read_private(runtime.session_path(root, "far")), "remote work is never assumed over"
+
+
 def test_at_startup_old_history_is_trimmed_and_leftovers_are_announced(view, monkeypatch):
     base = datetime.now(timezone.utc)
     for index in range(view.FINISHED_KEPT + 5):

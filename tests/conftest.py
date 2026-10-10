@@ -8,6 +8,14 @@ os.environ.setdefault("VIBE_LAUNCHER_LANGUAGE", "zh-TW")
 
 
 @pytest.fixture(autouse=True)
+def no_real_cli_user_data(tmp_path, monkeypatch):
+    """Automatic user-data discovery must never inspect the developer's skills or conversations in tests."""
+    from vibe_launcher import runtime
+    original = runtime.user_config_dir
+    monkeypatch.setattr(runtime, "user_config_dir", lambda tool, home=None: original(tool, home or tmp_path / "native-home"))
+
+
+@pytest.fixture(autouse=True)
 def no_real_modal_dialogs(monkeypatch):
     """A confirmation dialog that really opens would block the whole test run. Turn that into a clear failure instead:
     tests that exercise a confirmation patch ``view._confirm`` / ``page._confirm`` explicitly."""
@@ -16,6 +24,7 @@ def no_real_modal_dialogs(monkeypatch):
     def refuse(parent, title, message, **kwargs):
         raise AssertionError(f"ConfirmDialog opened during a test ({title!r}); patch the _confirm seam")
     monkeypatch.setattr(kit.ConfirmDialog, "ask", staticmethod(refuse))
+    monkeypatch.setattr(kit.ConfirmDialog, "ask_skippable", staticmethod(refuse))
 
 
 @pytest.fixture(autouse=True)

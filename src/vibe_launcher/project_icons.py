@@ -3,6 +3,7 @@
 The choice is a view preference, kept in ``ui-state.json`` (``project_icons``: project id -> entry) like pinned
 environments, so it never changes the project records. Pictures are copied into ``<data>/project-icons/`` under a random
 name; the original file is not referenced again. SVGs are drawn by Qt SVG, which loads nothing external and runs no script.
+Workspaces use the same entries, pictures folder and drawing, kept in ``workspace_icons`` (workspace id -> entry).
 """
 
 from __future__ import annotations
@@ -196,13 +197,15 @@ def _picture(entry: dict, size: int, dpr: float) -> QPixmap | None:
 
 
 def draw(painter: QPainter, rect: QRectF, project_id: str = "", *, entry: dict | None = None, selected: bool = False,
-         dpr: float = 2.0, radius: float = R.md, preview: tuple[bytes, str] | None = None) -> None:
+         dpr: float = 2.0, radius: float = R.md, preview: tuple[bytes, str] | None = None,
+         hue: str = "", glyph: str = "folder") -> None:
     """The project's tile in ``rect``: a tinted square with its glyph / SVG, or its picture filling the tile.
 
     ``entry`` overrides the stored choice and ``preview`` (bytes, extension) draws a picture not stored yet (the dialog).
+    ``hue`` and ``glyph`` are the defaults when nothing was chosen (workspaces use their own).
     """
     entry = entry if entry is not None else _entries.get(project_id)
-    hue = resolve(section_hue("projects"))
+    hue = resolve(hue or section_hue("projects"))
     color = (entry or {}).get("color") or hue
     side = min(rect.width(), rect.height())
     inner = round(side * 0.53)
@@ -225,7 +228,20 @@ def draw(painter: QPainter, rect: QRectF, project_id: str = "", *, entry: dict |
         size = round(side) if raster else inner
         painter.drawPixmap(round(rect.center().x() - size / 2), round(rect.center().y() - size / 2), picture)
     else:
-        name = entry["name"] if entry and entry["kind"] == "glyph" else "folder"
+        name = entry["name"] if entry and entry["kind"] == "glyph" else glyph
         painter.drawPixmap(round(rect.center().x() - inner / 2), round(rect.center().y() - inner / 2),
                            icons.pixmap(name, QColor(color), inner, dpr))
     painter.restore()
+
+
+def pixmap(entry: dict | None, size: int, *, hue: str = "", glyph: str = "folder", dpr: float = 2.0) -> QPixmap:
+    """A ``size`` px tile for menus and drop-downs (the same drawing as ``draw``)."""
+    pm = QPixmap(round(size * dpr), round(size * dpr))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pm)
+    try:
+        draw(painter, QRectF(0, 0, size, size), entry=entry or {}, dpr=dpr, radius=size * 0.25, hue=hue, glyph=glyph)
+    finally:
+        painter.end()
+    return pm

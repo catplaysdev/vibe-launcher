@@ -1,4 +1,4 @@
-"""Home: what is running, what needs attention, recent projects and a new version, in one glance.
+"""Home: what is running, what needs attention, the workspaces, recent projects and a new version, in one glance.
 
 Read-only: everything comes from records the window already loaded; buttons ask the window to act.
 """
@@ -11,7 +11,8 @@ from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollA
 
 from . import env_state
 from .i18n import environment_name, tr
-from .kit import EmptyState, IconTile, PageHeader, StatusBadge, dispose_widget, label, make_button, set_tone
+from .kit import (EmptyState, IconButton, IconTile, PageHeader, StatusBadge, dispose_widget, label, make_button,
+                  set_tone)
 from .theme import S, section_hue
 
 LIVE = {"connecting", "waiting_auth", "running", "detached"}
@@ -54,6 +55,51 @@ class Stat(QFrame):
         super().mouseReleaseEvent(event)
 
 
+class WorkspaceCard(QFrame):
+    """One desktop: its icon, name and what is in it. Clicking it switches to that desktop."""
+
+    clicked = Signal(str)
+    edit = Signal(str)
+
+    def __init__(self, card: dict[str, Any], parent: QWidget | None = None):
+        super().__init__(parent)
+        self.workspace_id = str(card["id"])
+        self.setProperty("surface", "card")
+        self.setProperty("workspaceCard", self.workspace_id)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(S.md, S.md, S.sm, S.md)
+        row.setSpacing(S.md)
+        self.tile = IconTile(36, 18)
+        self.tile.set_custom(card.get("icon"), section_hue("workspace"), "briefcase")
+        row.addWidget(self.tile, 0, Qt.AlignmentFlag.AlignTop)
+        column = QVBoxLayout()
+        column.setSpacing(2)
+        top = QHBoxLayout()
+        top.setSpacing(S.xs)
+        self.name = label(str(card["name"]), "subsection")
+        self.name.setTextFormat(Qt.TextFormat.PlainText)
+        top.addWidget(self.name, 1)
+        if card.get("current"):
+            top.addWidget(StatusBadge(tr("Current"), "info", "dot"))
+        column.addLayout(top)
+        self.caption = label(tr("{projects} project(s) · {open} open · {running} running", projects=card.get("projects", 0),
+                                open=card.get("open", 0), running=card.get("running", 0)), "meta", wrap=True)
+        column.addWidget(self.caption)
+        row.addLayout(column, 1)
+        self.edit_button = None
+        if card.get("editable"):
+            self.edit_button = IconButton("pencil", tr("Edit name and icon…"), size=28, icon_size=14)
+            self.edit_button.clicked.connect(lambda *_: self.edit.emit(self.workspace_id))
+            row.addWidget(self.edit_button, 0, Qt.AlignmentFlag.AlignTop)
+        self.setAccessibleName(f"{card['name']}, {self.caption.text()}")
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit(self.workspace_id)
+        super().mouseReleaseEvent(event)
+
+
 class HomePage(QWidget):
     page_requested = Signal(str)
     project_selected = Signal(str)        # show it on the Projects page
@@ -61,6 +107,9 @@ class HomePage(QWidget):
     restore_requested = Signal(str)       # bring its running work back
     add_project_requested = Signal()
     updates_requested = Signal()
+    workspace_requested = Signal(str)     # switch to that desktop
+    new_workspace_requested = Signal()
+    edit_workspace_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -109,6 +158,17 @@ class HomePage(QWidget):
         self._lay_out_stats()
 
         head = QHBoxLayout()
+        head.addWidget(label(tr("Workspaces"), "section"), 1)
+        head.addWidget(make_button(tr("New workspace"), "ghost", "plus", small=True,
+                                   callback=lambda *_: self.new_workspace_requested.emit()))
+        self.body.addLayout(head)
+        self.workspace_cards = QGridLayout()
+        self.workspace_cards.setSpacing(S.md)
+        self._cards: list[WorkspaceCard] = []
+        self.body.addLayout(self.workspace_cards)
+        self._workspace_signature = ""
+
+        head = QHBoxLayout()
         head.addWidget(label(tr("Recent projects"), "section"), 1)
         head.addWidget(make_button(tr("All projects"), "ghost", "arrow-right", small=True,
                                    callback=lambda: self.page_requested.emit("projects")))
@@ -133,15 +193,30 @@ class HomePage(QWidget):
         self.body.addLayout(self.environments)
         self.body.addStretch(1)
 
+    def _columns(self) -> int:
+        return 3 if self.width() >= 760 else 1
+
     def _lay_out_stats(self) -> None:
-        """Three across on a wide window, stacked on a narrow one."""
-        columns = 3 if self.width() >= 760 else 1
+        """Three across on a wide window, stacked on a narrow one (the workspace cards follow the same grid)."""
+        columns = self._columns()
         if columns == self._stat_columns:
             return
         self._stat_columns = columns
         for index, stat in enumerate((self.running, self.attention, self.unknown)):
             self.stats.removeWidget(stat)
             self.stats.addWidget(stat, index // columns, index % columns)
+        self._lay_out_cards()
+
+    def _lay_out_cards(self) -> None:
+        if not hasattr(self, "workspace_cards"):
+            return
+        columns = self._columns()
+        for card in self._cards:
+            self.workspace_cards.removeWidget(card)
+        for index, card in enumerate(self._cards):
+            self.workspace_cards.addWidget(card, index // columns, index % columns)
+        for column in range(3):
+            self.workspace_cards.setColumnStretch(column, 1 if column < columns else 0)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -149,7 +224,7 @@ class HomePage(QWidget):
 
     # -- data -------------------------------------------------------------------------------------
     def set_data(self, records: dict[str, list[dict[str, Any]]], states: list[env_state.EnvState],
-                 update: dict[str, Any] | None) -> None:
+                 update: dict[str, Any] | None, restorable: set[str] | frozenset[str] = frozenset()) -> None:
         sessions = records.get("sessions", [])
         statuses = [s.get("status", "unknown") for s in sessions]
         self.running.set(sum(1 for s in statuses if s in LIVE), tr("running or in the background"), "ok")
@@ -169,13 +244,13 @@ class HomePage(QWidget):
         projects = sorted(records.get("presets", []), key=lambda p: (str(p.get("last_used") or ""), bool(p.get("favorite"))),
                           reverse=True)[:RECENT]
         signature = repr(([(p.get("id"), p.get("name"), p.get("last_used"), env_state.project_status(p["id"], sessions))
-                           for p in projects], [(s.id, s.tone, s.status_text) for s in states]))
+                           for p in projects], [(s.id, s.tone, s.status_text) for s in states], sorted(restorable)))
         if signature == self._signature:
             return
         self._signature = signature
         self._clear(self.recent)
         for project in projects:
-            self.recent.addWidget(self._project_row(project, sessions, environments, accounts))
+            self.recent.addWidget(self._project_row(project, sessions, environments, accounts, project["id"] in restorable))
         self.empty.setVisible(not projects)
         while self.environments.count() > 1:
             item = self.environments.takeAt(0)
@@ -186,6 +261,26 @@ class HomePage(QWidget):
                                 tip=state.status_tip, max_width=320)
             self.environments.insertWidget(self.environments.count() - 1, badge)
 
+    def set_workspaces(self, cards: list[dict[str, Any]]) -> None:
+        """Cards of every desktop (see ``VibeLauncherWindow._workspace_cards``); rebuilt only when something changed."""
+        signature = repr(cards)
+        if signature == self._workspace_signature:
+            return
+        self._workspace_signature = signature
+        for widget in self._cards:
+            self.workspace_cards.removeWidget(widget)
+            dispose_widget(widget)
+        self._cards = []
+        for card in cards:
+            widget = WorkspaceCard(card)
+            widget.clicked.connect(self.workspace_requested)
+            widget.edit.connect(self.edit_workspace_requested)
+            self._cards.append(widget)
+        self._lay_out_cards()
+
+    def workspace_card_widgets(self) -> list[WorkspaceCard]:
+        return list(self._cards)
+
     @staticmethod
     def _clear(layout: QVBoxLayout) -> None:
         while layout.count():
@@ -193,7 +288,8 @@ class HomePage(QWidget):
             if item.widget() is not None:
                 dispose_widget(item.widget())
 
-    def _project_row(self, project: dict, sessions: list[dict], environments: dict, accounts: dict) -> QFrame:
+    def _project_row(self, project: dict, sessions: list[dict], environments: dict, accounts: dict,
+                     restorable: bool = False) -> QFrame:
         row = QFrame()
         row.setProperty("surface", "card")
         line = QHBoxLayout(row)
@@ -215,11 +311,15 @@ class HomePage(QWidget):
         sub.setTextFormat(Qt.TextFormat.PlainText)
         column.addWidget(sub)
         line.addLayout(column, 1)
+        live = env_state.project_status(project["id"], sessions) in LIVE
         badge = env_state.project_badge(project["id"], sessions)
+        if restorable and not live:                   # a workspace can bring it back as it was
+            badge = (tr("Restorable"), "info")
         if badge:
             line.addWidget(StatusBadge(badge[0], badge[1], "dot"))
-        live = env_state.project_status(project["id"], sessions) in LIVE
-        action = make_button(tr("Resume") if live else tr("Open"), "secondary" if live else "subtle",
+        text = tr("Resume") if live else tr("Restore") if restorable else tr("Open")
+        live = live or restorable
+        action = make_button(text, "secondary" if live else "subtle",
                              "repeat" if live else "play", small=True,
                              callback=lambda *_, p=project["id"], r=live: (self.restore_requested if r else self.open_requested).emit(p))
         line.addWidget(action)
