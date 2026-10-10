@@ -56,14 +56,13 @@ class FocusNavigation(QObject):
         self.choices: list[QWidget] = []
         self.overlay = _Overlay(self, window)
         theme_bus().changed.connect(self.overlay.update)     # a theme switch mid-navigation repaints at once
-        self.preview = self.overlay  # older name, kept for callers that check visibility
         QApplication.instance().installEventFilter(self)
 
     def candidates(self) -> list[QWidget]:
         workspace = self.window.workspace
-        if self.window.current_page() == "workspace" and workspace.tabs():
+        if self.window.current_page() == "workspace" and workspace.current_tabs():
             result = []
-            for tab in workspace.tabs():
+            for tab in workspace.current_tabs():
                 if tab.pane.isVisible() and workspace.area.on_screen(tab.pane):
                     result.append(tab.terminal)
                     if tab.pane.composer_visible():
@@ -142,7 +141,7 @@ class FocusNavigation(QObject):
             self.choose(min(scored, key=lambda item: item[0])[1])
         elif self.window.current_page() == "workspace" and self.window.workspace.area.mode == "tabs":
             workspace = self.window.workspace
-            order = [tab.info.id for tab in workspace.tabs()]
+            order = [tab.info.id for tab in workspace.current_tabs()]
             index = order.index(workspace.selected_id())
             workspace.select(order[(index + (-1 if direction in {"left", "up"} else 1)) % len(order)], focus=False)
             tab = self.window.workspace.tab(self.window.workspace.selected_id())

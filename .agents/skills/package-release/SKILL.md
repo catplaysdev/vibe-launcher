@@ -11,8 +11,13 @@ are Traditional Chinese).
 
 ## 0. Before anything
 
-1. `git status` and `git branch --show-current`. Work on a topic branch (`feat/…`, `fix/…`); never commit, push, tag or
-   publish unless the user asked for that step. Uncommitted changes belong to the user.
+1. `git status` and `git branch --show-current`; follow `AGENTS.md` → *Version control and collaboration*.
+   Features, docs and refactors use `feat/dev_<module>_<function>` from the latest `develop`; released-version fixes use
+   `fix_<module>_<function>[N]` from `hotfix` (create `hotfix` from `origin/main` if absent). Ask before carrying existing
+   uncommitted changes to a new branch; stay on the current branch only when the user explicitly asks.
+   Work branches stay local. When authorized, run the full tests, commit, merge into `develop` / `hotfix` with
+   `git merge --no-ff`, run the full tests again, push only the parent branch and delete the merged local work branch
+   with `git branch -d`. Commit, merge, push, open or merge PRs, tag and publish only when the user asks.
 2. The launcher may be running (it hosts this very session): `uv sync` fails on the locked `.venv\Scripts\vibe-launcher.exe`.
    Install build tools with `uv pip install --python .venv/Scripts/python.exe "pyinstaller>=6.10,<7"` instead.
 3. Scratch work goes to the session scratchpad, not the repo. `dist-app/`, `build-app/` and `packaging/*.ico` are git-ignored.
@@ -43,16 +48,20 @@ on this PC. Do not install system software without asking the user. Names are a 
 
 ## 3. Cut a release (only when the user asks)
 
-1. Topic branch: bump `version` in `pyproject.toml`; turn `[Unreleased]` in `CHANGELOG.md` into `## [x.y.z] - date`.
-   Anything the release removes or changes in `ui-state.json`, `settings.json` or the database goes under `### 設定變更`
-   as `- 移除: key` / `- 變更: key（說明）`; run `.venv/Scripts/python.exe tests/test_settings_compat.py --update-snapshot`
-   after adding settings. `python scripts/release_notes.py check vX.Y.Z` must pass.
-2. Full tests, then PR → CI → merge into `main` (the user merges).
+1. On `develop` or `hotfix`, bump `version` in `pyproject.toml`; turn `[Unreleased]` in `CHANGELOG.md` into
+   `## [x.y.z] - date`. Follow the version policy in `AGENTS.md` and keep the version, CHANGELOG and tag consistent.
+   Development-stage settings and data do not preserve older-build compatibility.
+   `python scripts/release_notes.py check vX.Y.Z` must pass.
+2. Run the full tests, commit and push the release changes on `develop` / `hotfix`; open a PR from that branch into
+   `main`. Merge only after `.github/workflows/ci.yml` passes (the user merges, or you when asked).
 3. Tag `vX.Y.Z` on `main` and push the tag (the user, or you when asked). `.github/workflows/release.yml` tests, builds,
    self-tests and runs `gh release create` with the installer, `SHA256SUMS.txt` and the CHANGELOG section as notes.
-4. Verify on GitHub: both assets are attached, the notes show the CHANGELOG section, the repository is public (a private
+4. Merge `main` back into `develop` with `git merge --no-ff`, run the full tests and push `develop`. After a `hotfix`
+   release, delete the merged `hotfix` locally and remotely; recreate it from `main` when the next released-version
+   fix comes. Perform these steps only when authorized.
+5. Verify on GitHub: both assets are attached, the notes show the CHANGELOG section, the repository is public (a private
    repository makes every installed copy show "unavailable"). A release without both assets is invisible to the updater.
-5. Install the published installer on a clean user profile or VM if one is available; then publish a second, newer
+6. Install the published installer on a clean user profile or VM if one is available; then publish a second, newer
    release and confirm Settings › About and updates updates the first one in place (backup made, checksum checked,
    launcher restarted). This end-to-end path is **not verified yet**; record what you learn in AGENTS.md.
 

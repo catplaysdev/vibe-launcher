@@ -1,7 +1,4 @@
-"""About and updates: version, newer releases (only those above the installed one) and their notes.
-
-Releases that change or remove settings are flagged and list each affected setting, so nothing changes silently.
-"""
+"""About and updates: version, newer releases (only those above the installed one) and their notes."""
 from __future__ import annotations
 
 from typing import Any
@@ -19,18 +16,6 @@ SPONSOR_URL = "https://buymeacoffee.com/catplaysdev"
 LICENSES = (("xterm.js", "MIT"), ("PySide6 / Qt", "LGPLv3"), ("Lucide icons", "ISC"))
 
 
-def settings_changes(report: dict[str, Any] | None) -> list[tuple[str, dict]]:
-    """(version, change) for every setting a pending update removes or changes."""
-    return [(release.get("version", ""), change) for release in (report or {}).get("releases", [])
-            for change in release.get("settings_changes", [])]
-
-
-def change_text(change: dict) -> str:
-    kind = tr("Removed") if change.get("kind") == "removed" else tr("Changed")
-    detail = change.get("detail", "")
-    return f"{kind}：{change.get('key', '')}" + (f"（{detail}）" if detail else "")
-
-
 class ReleaseCard(QFrame):
     def __init__(self, release: dict[str, Any], parent: QWidget | None = None):
         super().__init__(parent)
@@ -45,15 +30,6 @@ class ReleaseCard(QFrame):
         layout.addLayout(head)
         for note in release.get("notes", [])[:20]:
             layout.addWidget(label("• " + note, wrap=True))
-        changes = release.get("settings_changes", [])
-        if changes:
-            warning = label(tr("This version changes settings:"), wrap=True)
-            set_tone(warning, "warn")
-            layout.addWidget(warning)
-            for change in changes:
-                item = label("  " + change_text(change), wrap=True)
-                set_tone(item, "warn")
-                layout.addWidget(item)
         for child in self.findChildren(QLabel):
             child.setTextFormat(Qt.TextFormat.PlainText)
 

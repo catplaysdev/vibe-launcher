@@ -110,15 +110,6 @@ def test_workspaces_survive_a_project_being_deleted_and_travel_with_exported_con
     assert [w["name"] for w in other.list("workspaces")] == ["日常"]
 
 
-def test_older_config_files_without_workspaces_still_import(tmp_path):
-    path = tmp_path / "old.json"
-    path.write_text(json.dumps({"version": 1, "accounts": [], "environments": [], "presets": []}), encoding="utf-8")
-    Store(tmp_path / "x.db").import_config(path)
-    path.write_text(json.dumps({"version": 1, "accounts": [], "environments": [], "presets": [], "surprise": []}), encoding="utf-8")
-    with pytest.raises(ValueError):
-        Store(tmp_path / "y.db").import_config(path)
-
-
 def test_sessions_know_their_mode(store):
     base = {"id": "s", "preset_id": "p1", "account_id": "a", "environment_id": "local", "name": "n", "path": "p"}
     assert store.save("sessions", {**base, "mode": "shell"})["mode"] == "shell"
@@ -421,13 +412,6 @@ def test_move_terminal_changes_grid_navigation_and_saved_slot_order(page, store)
     page.goto(3)
     assert page.selected_id() == second.info.id and not page.move_down_button.isEnabled()
     assert all(t.alive() and not t.terminal.terminated for t in page.tabs())
-
-
-def test_history_import_option_is_explicit_and_validated(store):
-    assert store.get("accounts", "a")["import_history"] is False
-    assert store.save("accounts", dict(ACCOUNT, import_history=True))["import_history"] is True
-    with pytest.raises(ValueError, match="import_history"):
-        store.save("accounts", dict(ACCOUNT, import_history="true"))
 
 
 def test_chords_from_inside_a_terminal_are_routed(page, qtbot):
@@ -764,6 +748,146 @@ def test_opening_a_workspace_skips_projects_that_no_longer_exist(window):
     assert any("略過" in t.text.text() for t in view.toasts.toasts)
 
 
+def test_desktops_keep_multiple_projects_layout_focus_and_processes(window):
+    view, store, service = window
+    store.save("workspaces", {"id": "one", "name": "One", "slots": [
+        {"preset_id": "p1", "kind": "agent", "account_id": "a"},
+        {"preset_id": "p2", "kind": "shell"}]})
+    store.save("workspaces", {"id": "two", "name": "Two", "slots": []})
+    view.reload()
+    view.open_workspace("one")
+    first, second = view.workspace.current_tabs()
+    first.pane.composer.edit.setPlainText("Keep this draft")
+    view.workspace.set_layout("grid")
+    view.workspace.select(first.info.id)
+    area = view.workspace.area
+    view.open_workspace("two")
+    assert view.workspace.current_tabs() == []
+    assert view.workspace.right.currentWidget() is view.workspace.empty
+    view.open_terminal("p2", "shell")
+    third, = view.workspace.current_tabs()
+    assert view.workspace.area is not area
+    for _ in range(3):
+        view.open_workspace("one")
+        assert view.workspace.area is area and area.mode == "grid"
+        assert view.workspace.selected_id() == first.info.id
+        assert view.workspace.current_tabs() == [first, second]
+        assert first.pane.composer.edit.toPlainText() == "Keep this draft"
+        view.open_workspace("two")
+        assert view.workspace.current_tabs() == [third]
+    assert len(service.calls) == 3 and view.workspace.running_count() == 3
+    assert all(not t.terminal.terminated for t in view.workspace.tabs())
+    assert store.get("workspaces", "one")["layout"] == "grid"
+    view.workspace.select(first.info.id)
+    assert view.workspace.workspace_id == "one"
+    view.workspace.goto(2)
+    assert view.workspace.selected_id() == second.info.id
+
+
+def test_repeated_open_and_attach_do_not_create_more_sessions(window):
+    view, store, service = window
+    store.save("workspaces", {"id": "one", "name": "One", "slots": [{"preset_id": "p1", "kind": "shell"}]})
+    view.reload()
+    view.open_workspace("one")
+    tab, = view.workspace.tabs()
+    view.open_workspace("")
+    view._invoke("attach", session_id=tab.info.session_id)
+    view.open_workspace("one")
+    assert len(service.calls) == 1
+    assert view.workspace.workspace_id == "one"
+
+
+def test_background_desktop_closes_only_its_own_terminal(window):
+    view, store, service = window
+    view.open_terminal("p1", "shell")
+    background, = view.workspace.tabs()
+    store.save("workspaces", {"id": "two", "name": "Two", "slots": []})
+    view.reload()
+    view.open_workspace("two")
+    view.open_terminal("p2", "shell")
+    foreground, = view.workspace.current_tabs()
+    background.terminal.finish()
+    view.workspace.close_tab(background.info.id)
+    assert view.workspace.current_tabs() == [foreground]
+    assert view.workspace.area.panes == [foreground.pane]
+    assert view.workspace.selected_id() == foreground.info.id
+
+
+def test_deleted_workspace_keeps_live_terminals_accessible(window, monkeypatch):
+    view, store, service = window
+    store.save("workspaces", {"id": "one", "name": "One", "slots": [{"preset_id": "p1", "kind": "shell"}]})
+    view.reload()
+    view.open_workspace("one")
+    tab, = view.workspace.tabs()
+    monkeypatch.setattr(view, "_confirm", lambda *a, **k: True)
+    view.delete_workspace("one")
+    assert not store.list("workspaces")
+    view.open_workspace("")
+    view.workspace.select(tab.info.id)
+    assert view.workspace.current_tabs() == [tab]
+    assert not tab.terminal.terminated
+    assert view.workspace.workspace_picker.currentData() == "one"
+
+
+def test_new_desktop_is_empty_and_does_not_move_existing_terminals(window, monkeypatch):
+    from vibe_launcher import ui
+    view, store, service = window
+    view.open_terminal("p1", "shell")
+    tab, = view.workspace.tabs()
+
+    class Dialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return ui.QDialog.DialogCode.Accepted
+
+        def values(self):
+            return {"name": "Review"}
+
+    monkeypatch.setattr(ui, "RecordDialog", Dialog)
+    view.new_workspace()
+    record, = store.list("workspaces")
+    assert record["slots"] == [] and record["name"] == "Review"
+    assert view.workspace.workspace_id == record["id"]
+    assert view.workspace.current_tabs() == []
+    view.open_workspace("")
+    assert view.workspace.current_tabs() == [tab]
+
+
+def test_saved_desktop_reattaches_existing_remote_work(window):
+    view, store, service = window
+    store.save("accounts", {**store.get("accounts", "a"), "environment_id": "srv"})
+    store.save("sessions", {"id": "remote", "preset_id": "p1", "account_id": "a", "environment_id": "srv",
+                            "name": "Project", "path": "/w/web", "status": "detached", "persistent": True})
+    store.save("workspaces", {"id": "one", "name": "One", "slots": [{"preset_id": "p1", "kind": "agent", "account_id": "a"}]})
+    view.reload()
+    view.open_workspace("one")
+    assert service.calls[0][0] == "attach" and service.calls[0][1]["session_id"] == "remote"
+    assert len(service.calls) == 1
+
+
+def test_failed_restore_does_not_erase_saved_slots_on_switch(window):
+    view, store, service = window
+    record = store.save("workspaces", {"id": "one", "name": "One", "slots": [{"preset_id": "p1", "kind": "shell"}]})
+    view.reload()
+    service.fail = ValueError("Cannot start this terminal")
+    view.open_workspace("one")
+    assert view.workspace.current_tabs() == []
+    view.open_workspace("")
+    assert store.get("workspaces", "one") == record
+
+
+def test_external_terminal_mode_does_not_create_an_empty_saved_desktop(window):
+    view, store, service = window
+    record = store.save("workspaces", {"id": "one", "name": "One", "slots": [{"preset_id": "p1", "kind": "shell"}]})
+    view.reload()
+    view.toggle_external_terminal()
+    view.open_workspace("one")
+    assert view.workspace.workspace_id == "" and not service.calls
+    assert store.get("workspaces", "one") == record
+
+
 def test_deleting_a_workspace_asks_first(window, monkeypatch):
     view, store, service = window
     store.save("workspaces", {"id": "w", "name": "舊的", "slots": [{"preset_id": "p1", "kind": "agent"}]})
@@ -804,6 +928,25 @@ def test_closing_the_app_asks_when_terminals_are_connected(window, monkeypatch):
     event = QCloseEvent()
     view.closeEvent(event)
     assert event.isAccepted() and view.workspace.tabs() == []
+
+
+def test_closing_with_only_local_terminals_says_so_and_ends_their_sessions(window, monkeypatch):
+    view, store, service = window
+    store.save("presets", {"id": "p3", "name": "本機專案", "account_id": "a", "environment_id": "local", "path": "C:/w/local",
+                           "ask_account": False})
+    view.reload()
+    view.open_terminal("p3", "agent", "a", "local")
+    tab = view.workspace.tabs()[0]
+    assert tab.info.local and not tab.info.tmux
+    store.save("sessions", {"id": tab.info.session_id, "preset_id": "p3", "account_id": "a", "environment_id": "local",
+                            "name": "本機專案", "path": "C:/w/local", "status": "running", "updated_at": runtime.now()})
+    asked = []
+    monkeypatch.setattr(view, "_confirm", lambda title, message, **kw: asked.append(message) or True)
+    from PySide6.QtGui import QCloseEvent
+    event = QCloseEvent()
+    view.closeEvent(event)
+    assert event.isAccepted() and "tmux" not in asked[0]
+    assert store.get("sessions", tab.info.session_id)["status"] == "ended"
 
 
 def test_the_workspace_is_a_page_with_a_shortcut(window):
@@ -966,3 +1109,396 @@ def test_agent_terminals_can_refresh_the_projects_conversations_from_other_accou
     view.open_terminal("p1", kind="shell")
     shell = [t for t in view.workspace.tabs() if t.info.kind == "shell"][0]
     assert not shell.pane.history_button.isVisibleTo(shell.pane)
+
+
+# ----------------------------------------------------------------------------- workspace names, icons, Home and Projects
+class FakeIconDialog:
+    """Stands in for the name-and-icon dialog: records how it was opened and answers with ``answer``."""
+    answer = {"name": "工地", "entry": {"kind": "glyph", "name": "crane", "color": ""}}
+    opened = []
+
+    def __init__(self, parent, name, entry, **kwargs):
+        FakeIconDialog.opened.append((name, entry, kwargs))
+
+    def exec(self):
+        from vibe_launcher import ui
+        return ui.QDialog.DialogCode.Accepted
+
+    def result_name(self):
+        return self.answer["name"]
+
+    def result_entry(self, root):
+        return self.answer["entry"]
+
+
+@pytest.fixture
+def icon_dialog(monkeypatch):
+    from vibe_launcher import project_icon_dialog
+    FakeIconDialog.opened = []
+    FakeIconDialog.answer = {"name": "工地", "entry": {"kind": "glyph", "name": "crane", "color": ""}}
+    monkeypatch.setattr(project_icon_dialog, "ProjectIconDialog", FakeIconDialog)
+    return FakeIconDialog
+
+
+def test_the_default_desktop_gets_its_own_name_and_icon(window, icon_dialog):
+    view, store, service = window
+    view.edit_workspace("")
+    assert icon_dialog.opened[0][2]["glyph"] == "briefcase" and icon_dialog.opened[0][2]["name_label"]
+    assert view.prefs.default_workspace_name == "工地" and view.prefs.workspace_icons["@default"]["name"] == "crane"
+    assert view.workspace.workspace_picker.itemText(0) == "工地"
+    assert view.home_page.workspace_card_widgets()[0].name.text() == "工地"
+    assert not store.list("workspaces"), "the default desktop stays a view preference, not a record"
+
+
+def test_renaming_a_saved_workspace_keeps_its_terminals_and_slots(window, icon_dialog):
+    view, store, service = window
+    slots = [{"preset_id": "p1", "kind": "shell"}]
+    store.save("workspaces", {"id": "one", "name": "One", "slots": slots})
+    view.reload()
+    icon_dialog.answer = {"name": "Site", "entry": None}
+    view.edit_workspace("one")
+    saved = store.get("workspaces", "one")
+    assert saved["name"] == "Site" and saved["slots"] == slots and "one" not in view.prefs.workspace_icons
+    assert "One" in icon_dialog.opened[0][2]["taken"] or "預設工作區" in icon_dialog.opened[0][2]["taken"]
+
+
+def test_a_deleted_workspace_takes_its_icon_with_it(window, monkeypatch):
+    view, store, service = window
+    store.save("workspaces", {"id": "one", "name": "One", "slots": []})
+    view.prefs.workspace_icons["one"] = {"kind": "glyph", "name": "crane", "color": ""}
+    view.reload()
+    monkeypatch.setattr(view, "_confirm", lambda *a, **k: True)
+    view.delete_workspace("one")
+    assert "one" not in view.prefs.workspace_icons
+
+
+def test_the_menu_and_palette_offer_every_desktop_and_editing(window):
+    view, store, service = window
+    store.save("workspaces", {"id": "one", "name": "One", "slots": []})
+    view.reload()
+    texts = [action.text for action in view.workspace.workspace_menu_actions()]
+    assert "編輯名稱與圖示…" in texts
+    titles = [c.title for c in view._commands()]
+    assert "切換工作區：預設工作區" in titles and "切換工作區：One" in titles
+    assert "編輯目前工作區的名稱與圖示…" in titles
+
+
+def test_home_shows_a_card_per_desktop_and_switches_on_click(window):
+    view, store, service = window
+    store.save("workspaces", {"id": "one", "name": "One", "slots": [{"preset_id": "p1", "kind": "shell"}]})
+    view.reload()
+    view.open_terminal("p2", "shell")
+    default, one = view.home_page.workspace_card_widgets()
+    assert "1 個專案 · 1 個開啟 · 1 個執行中" in default.caption.text()
+    assert "1 個專案 · 0 個開啟" in one.caption.text(), "a saved desktop not opened yet counts its saved projects"
+    one.clicked.emit("one")
+    assert view.workspace.workspace_id == "one" and view.current_page() == "workspace"
+
+
+def test_projects_show_filter_and_open_into_workspaces(window):
+    from vibe_launcher.ui import NO_WORKSPACE
+    view, store, service = window
+    store.save("workspaces", {"id": "one", "name": "One", "slots": [{"preset_id": "p1", "kind": "agent", "account_id": "a"}]})
+    view.reload()
+    view.show_page("projects")
+    rows = {view.project_list.item(i).data(Qt.ItemDataRole.UserRole): view.project_list.item(i).text()
+            for i in range(view.project_list.count())}
+    assert "工作區：One" in rows["p1"] and "工作區" not in rows["p2"]
+    box = view.project_workspace_filter
+    box.setCurrentIndex(box.findData("one"))
+    assert [view.project_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(view.project_list.count())] == ["p1"]
+    box.setCurrentIndex(box.findData(NO_WORKSPACE))
+    assert [view.project_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(view.project_list.count())] == ["p2"]
+    view.clear_project_filters()
+    assert view.project_list.count() == 2
+    # opening p1 "in One" restores One's saved terminal for it and does not start a second one
+    view._selected_project = "p1"
+    view.open_project_in_workspace("one")
+    assert view.workspace.workspace_id == "one" and len(service.calls) == 1
+    # opening p2 there adds it to that desktop
+    view._selected_project = "p2"
+    view.open_project_in_workspace("one")
+    assert [t.info.preset_id for t in view.workspace.current_tabs()] == ["p1", "p2"]
+    view._show_project_workspaces("p2")
+    layout = view.project_workspaces
+    chips = [layout.itemAt(i).widget() for i in range(layout.count()) if layout.itemAt(i).widget().property("workspaceChip") is not None]
+    assert [chip.property("workspaceChip") for chip in chips] == ["one"]
+    view.open_workspace("")
+    chips[0].click()
+    assert view.workspace.workspace_id == "one"
+
+
+def test_open_in_a_new_workspace_and_external_terminal_mode(window, monkeypatch):
+    from vibe_launcher import ui
+    view, store, service = window
+
+    class Dialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return ui.QDialog.DialogCode.Accepted
+
+        def values(self):
+            return {"name": "Review"}
+
+    monkeypatch.setattr(ui, "RecordDialog", Dialog)
+    view._selected_project = "p2"
+    view.open_project_in_workspace(None)
+    record, = store.list("workspaces")
+    tab, = view.workspace.current_tabs()
+    assert view.workspace.workspace_id == record["id"] and tab.info.workspace_id == record["id"] and tab.info.preset_id == "p2"
+    view.toggle_external_terminal()
+    calls = len(service.calls)
+    view.open_project_in_workspace("")
+    assert len(service.calls) == calls and view.workspace.workspace_id == record["id"]
+
+
+def test_the_sessions_drawer_groups_open_sessions_by_workspace(window):
+    view, store, service = window
+    store.save("workspaces", {"id": "one", "name": "One", "slots": []})
+    view.reload()
+    view.open_terminal("p1", "agent")
+    first = view.workspace.current_tabs()[0]
+    view.open_workspace("one")
+    view.open_terminal("p1", "agent")
+    second = view.workspace.current_tabs()[0]
+    for tab in (first, second):
+        store.save("sessions", {"id": tab.info.session_id, "preset_id": "p1", "account_id": "a", "environment_id": "srv",
+                                "name": "前端", "path": "/w/web", "status": "running", "updated_at": runtime.now()})
+    store.save("sessions", {"id": "old", "preset_id": "p1", "account_id": "a", "environment_id": "srv", "name": "前端",
+                            "path": "/w/web", "status": "ended", "updated_at": runtime.now()})
+    view.reload()
+    view.show_page("projects")
+    view._show_project("p1")
+    groups = [w.property("workGroup") for w in view.work_drawer.findChildren(QObject) if w.property("workGroup") is not None]
+    assert groups == ["預設工作區", "One", ""]
+    assert "預設工作區、One" in view.work_drawer.summary.text()
+
+
+# ----------------------------------------------------------------------------- reload, send confirmation, autosave
+def test_the_input_bar_asks_before_sending_until_told_not_to(window, monkeypatch):
+    view, store, service = window
+    view.open_terminal("p1", "agent")
+    tab = view.workspace.tabs()[0]
+    sent = []
+    tab.terminal.submit = sent.append
+    answers = [(False, False), (True, True)]
+    monkeypatch.setattr(view.workspace, "_confirm_skippable", lambda *a, **k: answers.pop(0))
+    edit = tab.pane.composer.edit
+    edit.setPlainText("run the tests")
+    edit.send()
+    assert sent == [] and edit.toPlainText() == "run the tests", "declined: nothing sent, the text stays"
+    edit.send()
+    assert sent == ["run the tests"] and view.prefs.confirm_send is False
+    edit.setPlainText("again")
+    edit.send()                                            # no more questions (answers is empty now)
+    assert sent == ["run the tests", "again"]
+
+
+def test_reload_restarts_a_terminal_in_place_and_continues_the_conversation(window, monkeypatch):
+    view, store, service = window
+    view.open_terminal("p1", "agent")
+    view.open_terminal("p2", "shell")
+    first, second = view.workspace.current_tabs()
+    first.info.tmux, first.info.local = False, True        # a local terminal: it ends with its window
+    store.save("sessions", {"id": first.info.session_id, "preset_id": "p1", "account_id": "a", "environment_id": "local",
+                            "name": "前端", "path": "C:/p1", "status": "running", "persistent": False})
+    monkeypatch.setattr(view.workspace, "_confirm_skippable", lambda *a, **k: (True, False))
+    service.calls.clear()
+    first.pane.reload_button.click()
+    assert [c[0] for c in service.calls] == ["launch"] and service.calls[0][1]["resume"] is True
+    tabs = view.workspace.current_tabs()
+    assert len(tabs) == 2 and tabs[1] is second and tabs[0] is not first, "the new terminal takes the old one's place"
+    assert view.prefs.confirm_reload is True
+    assert store.get("sessions", first.info.session_id)["status"] == "ended", "the replaced run is recorded as over"
+
+
+def test_reload_of_a_tmux_terminal_reattaches(window, monkeypatch):
+    view, store, service = window
+    view.open_terminal("p1", "agent")
+    tab = view.workspace.current_tabs()[0]
+    tab.info.tmux = True
+    monkeypatch.setattr(view.workspace, "_confirm_skippable", lambda *a, **k: (True, False))
+    service.calls.clear()
+    view.workspace.reload_tab(tab.info.id)
+    assert service.calls[0][0] == "attach" and service.calls[0][1]["session_id"] == tab.info.session_id
+
+
+def test_desktops_are_saved_as_terminals_open_and_close(window):
+    view, store, service = window
+    store.save("workspaces", {"id": "one", "name": "One", "slots": []})
+    view.reload()
+    view.open_terminal("p1", "agent")
+    assert [s["preset_id"] for s in view.prefs.default_workspace["slots"]] == ["p1"]
+    view.open_workspace("one")
+    view.open_terminal("p2", "shell")
+    assert [s["preset_id"] for s in store.get("workspaces", "one")["slots"]] == ["p2"]
+    assert view.prefs.last_workspace == "one"
+    tab = view.workspace.current_tabs()[0]
+    tab.terminal.finish()
+    view.workspace.close_tab(tab.info.id)
+    assert store.get("workspaces", "one")["slots"] == [], "closing a terminal on purpose takes it out"
+    view.open_workspace("")
+    view.workspace.shutdown()                              # closing the launcher is not "closing every terminal"
+    assert [s["preset_id"] for s in view.prefs.default_workspace["slots"]] == ["p1"]
+
+
+def test_after_a_restart_the_last_desktop_offers_its_terminals(tmp_path, qtbot, window):
+    view, store, service = window
+    view.open_terminal("p1", "agent")
+    view.workspace.shutdown()
+    again = MainWindow(store, service, terminal_factory=FakeTerminal)
+    qtbot.addWidget(again, before_close_func=lambda w: w.workspace.shutdown())
+    assert again.workspace.restore_button.isVisibleTo(again.workspace) and "1" in again.workspace.restore_button.text()
+    assert again.workspace.tabs() == [], "nothing starts by itself"
+    service.calls.clear()
+    again.workspace.restore_button.click()
+    assert service.calls[0][0] == "launch" and service.calls[0][1]["resume"] is True
+    assert not again.workspace.restore_button.isVisibleTo(again.workspace)
+
+
+def test_project_running_follows_the_open_terminals(window):
+    view, store, service = window
+    store.save("presets", {"id": "p3", "name": "本機專案", "account_id": "a", "environment_id": "local", "path": "C:/w/l",
+                           "ask_account": False})
+    store.save("sessions", {"id": "stale", "preset_id": "p3", "account_id": "a", "environment_id": "local", "name": "本機專案",
+                            "path": "C:/w/l", "status": "running", "updated_at": runtime.now()})
+    view.reload()
+    view.show_page("projects")
+    badges = {view.project_list.item(i).data(Qt.ItemDataRole.UserRole): view.project_list.item(i).data(0x0101)
+              for i in range(view.project_list.count())}
+    assert badges["p3"][0] != "運行中", "no terminal is open for it"
+    assert view.home_page.running.value.text() == "0"
+
+
+def test_finished_local_runs_leave_no_record_once_their_terminal_is_closed(window):
+    view, store, service = window
+    store.save("sessions", {"id": "old", "preset_id": "p1", "account_id": "a", "environment_id": "local", "name": "前端",
+                            "path": "/w/web", "status": "ended", "updated_at": runtime.now()})
+    view.reload()
+    view.open_terminal("p2", "shell")
+    assert not [s for s in store.list("sessions") if s["id"] == "old"]
+
+
+def test_restoring_a_project_returns_to_its_workspace(window):
+    view, store, service = window
+    store.save("workspaces", {"id": "one", "name": "One", "slots": [{"preset_id": "p1", "kind": "agent", "account_id": "a"}]})
+    view.reload()
+    view.restore_project("p1")
+    assert view.workspace.workspace_id == "one" and service.calls[-1][1].get("resume") is True
+    calls = len(service.calls)
+    view.open_workspace("")
+    view.restore_project("p1")
+    assert view.workspace.workspace_id == "one" and len(service.calls) == calls, "an open terminal is shown, not reopened"
+
+
+# ----------------------------------------------------------------------------- review fixes
+def restart(store, service, qtbot):
+    again = MainWindow(store, service, terminal_factory=FakeTerminal)
+    qtbot.addWidget(again, before_close_func=lambda w: w.workspace.shutdown())
+    return again
+
+
+def test_the_default_desktop_survives_a_restart_on_another_desktop(window, qtbot):
+    view, store, service = window
+    store.save("workspaces", {"id": "one", "name": "One", "slots": []})
+    view.reload()
+    view.open_terminal("p1", "agent")
+    view.open_workspace("one")
+    view.open_terminal("p2", "shell")
+    view.workspace.shutdown()
+    again = restart(store, service, qtbot)
+    assert again.workspace.workspace_id == "one"
+    again.open_terminal("p2", "shell")                    # a save happens: the default desktop must not be emptied
+    assert [s["preset_id"] for s in again.prefs.default_workspace["slots"]] == ["p1"]
+    again.open_workspace("")
+    assert "1" in again.workspace.restore_button.text() and again.workspace.restore_button.isVisibleTo(again.workspace)
+
+
+def test_separate_window_mode_keeps_the_saved_default_desktop(window, qtbot):
+    view, store, service = window
+    view.open_terminal("p1", "agent")
+    view.workspace.shutdown()
+    view.prefs.external_terminal = True
+    view.prefs.save()
+    again = restart(store, service, qtbot)
+    again.workspace.set_layout("grid")                    # anything that saves
+    assert [s["preset_id"] for s in again.prefs.default_workspace["slots"]] == ["p1"]
+    assert not again.workspace.restore_button.isVisibleTo(again.workspace)
+
+
+def test_a_workspace_with_a_deleted_project_still_saves_and_failures_wait(window):
+    view, store, service = window
+    store.save("workspaces", {"id": "one", "name": "One", "slots": [{"preset_id": "gone", "kind": "agent"},
+                                                                  {"preset_id": "p2", "kind": "shell"}]})
+    view.reload()
+    service.fail = ValueError("Cannot start this terminal")
+    view.open_workspace("one")
+    assert [s["preset_id"] for s in store.get("workspaces", "one")["slots"]] == ["p2"], "the failed one waits, the deleted one goes"
+    assert view.workspace.restore_button.isVisibleTo(view.workspace)
+    view.open_terminal("p1", "agent")
+    assert [s["preset_id"] for s in store.get("workspaces", "one")["slots"]] == ["p1", "p2"], "still saved as you go"
+
+
+def test_restoring_does_not_open_a_second_copy_of_an_open_terminal(window, qtbot):
+    view, store, service = window
+    view.open_terminal("p1", "agent")
+    view.workspace.shutdown()
+    again = restart(store, service, qtbot)
+    again.open_terminal("p1", "agent")
+    service.calls.clear()
+    again.restore_pending("")
+    assert service.calls == [] and len(again.workspace.current_tabs()) == 1
+
+
+def test_a_direct_ssh_run_without_its_terminal_is_not_shown_as_background(window):
+    view, store, service = window
+    store.save("sessions", {"id": "direct", "preset_id": "p1", "account_id": "a", "environment_id": "srv", "name": "前端",
+                            "path": "/w/web", "status": "running", "persistent": False, "updated_at": runtime.now()})
+    view.reload()
+    status = {s["id"]: s["status"] for s in view._effective_sessions()}
+    assert status["direct"] == "unknown"
+
+
+def test_after_a_restart_projects_offer_to_resume(window, qtbot):
+    view, store, service = window
+    view.open_terminal("p1", "agent")
+    view.workspace.shutdown()
+    again = restart(store, service, qtbot)
+    again.show_page("projects")
+    badges = {again.project_list.item(i).data(Qt.ItemDataRole.UserRole): again.project_list.item(i).data(0x0101)
+              for i in range(again.project_list.count())}
+    assert badges["p1"][0] == "可恢復"
+    from PySide6.QtWidgets import QPushButton
+    assert "恢復" in {b.text() for b in again.findChildren(QPushButton)}, "Home offers Restore, not Open"
+    service.calls.clear()
+    again.restore_project("p1")
+    assert service.calls[0][1].get("resume") is True and again.workspace.workspace_id == ""
+
+
+def test_restoring_a_finished_terminal_restarts_it_on_its_own_desktop(window):
+    view, store, service = window
+    store.save("workspaces", {"id": "one", "name": "One", "slots": []})
+    view.reload()
+    view.open_workspace("one")
+    view.open_terminal("p1", "agent")
+    tab = view.workspace.current_tabs()[0]
+    tab.info.tmux = False
+    tab.terminal.finish()
+    view.open_workspace("")
+    view.restore_project("p1")
+    assert view.workspace.workspace_id == "one"
+    assert len(view.workspace.desktop_tabs("one")) == 1 and view.workspace.desktop_tabs("one")[0] is not tab
+    assert view.workspace.desktop_tabs("") == []
+
+
+def test_a_reload_that_cannot_start_keeps_the_old_terminal(window, monkeypatch):
+    view, store, service = window
+    view.open_terminal("p1", "agent")
+    tab = view.workspace.current_tabs()[0]
+    tab.info.tmux = False
+    monkeypatch.setattr(view, "_notice", lambda *a, **k: None)
+    service.fail = ValueError("Cannot start this terminal")
+    view.reload_terminal(tab.info.id)
+    assert view.workspace.current_tabs() == [tab] and tab.alive()

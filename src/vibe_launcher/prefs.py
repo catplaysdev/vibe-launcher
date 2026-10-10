@@ -2,10 +2,7 @@
 
 Kept out of the SQLite store on purpose: these are view settings, not launcher
 records, so they are never part of exported/imported configuration.
-
-Compatibility: a file written by a newer build must survive an older build untouched. Unknown keys are kept in
-``_extra`` and written back, and a known key whose stored value this build cannot use (for example a theme added
-later) keeps its stored value on disk unless the user actually changes that setting here.
+A value this build cannot use falls back to its default; keys it does not know are dropped on the next save.
 """
 
 from __future__ import annotations
@@ -17,8 +14,6 @@ from .theme import TERMINAL_FONT_SIZES, THEMES, UI_SCALES, valid_color, valid_fo
 from . import runtime
 
 
-PREFS_VERSION = 1
-
 
 def valid_anchor(value: object) -> list[float] | None:
     """A toast anchor is None (default corner) or [x_ratio, y_ratio] with both ratios in 0..1."""
@@ -26,6 +21,31 @@ def valid_anchor(value: object) -> list[float] | None:
             and all(isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 1 for v in value)):
         return [float(value[0]), float(value[1])]
     return None
+
+
+def valid_workspace_name(value: object) -> str:
+    """A display name: one line, at most 64 characters; anything else falls back to "" (the translated default)."""
+    if not isinstance(value, str):
+        return ""
+    name = " ".join(value.split())
+    return name if len(name) <= 64 and name.isprintable() else ""
+
+
+def valid_desktop(value: object) -> dict:
+    """The default desktop's saved arrangement: the same slot shape as a saved workspace record (store.py)."""
+    result = {"layout": "tabs", "slots": []}
+    if not isinstance(value, dict):
+        return result
+    result["layout"] = "grid" if value.get("layout") == "grid" else "tabs"
+    slots = value.get("slots")
+    for slot in (slots if isinstance(slots, list) else [])[:16]:
+        if not isinstance(slot, dict) or slot.get("kind") not in {"agent", "shell"}:
+            continue
+        clean = {key: slot[key] for key in ("preset_id", "kind", "account_id", "environment_id", "terminal_profile")
+                 if isinstance(slot.get(key), str) and 0 < len(slot[key]) <= 128}
+        if "preset_id" in clean:
+            result["slots"].append(clean)
+    return result
 
 
 def valid_ui_scale(value: object) -> int:
@@ -42,18 +62,17 @@ def stored_ui_scale(path: Path) -> int:
 
 
 class UiPrefs:
-    # Defaults that depend on the machine (e.g. the OS language) rather than on the code.
-    DYNAMIC_DEFAULTS = frozenset({"language"})
-
     def __init__(self, path: Path):
         self.path = Path(path)
-        self.version = PREFS_VERSION
-        self._extra: dict = {}                  # keys written by newer builds; preserved verbatim
-        self._raw: dict = {}                    # stored values of known keys, as found on disk
-        self._loaded: dict = {}                 # what this build understood from them
         self.sidebar_collapsed = False
         self.pinned: set[str] = set()
         self.project_icons: dict[str, dict] = {}   # project id -> icon entry (see project_icons.valid_entry)
+        self.workspace_icons: dict[str, dict] = {}  # workspace id ("@default" for the unsaved default desktop) -> entry
+        self.default_workspace_name = ""        # the default desktop's own name; "" = the translated "Default workspace"
+        self.default_workspace: dict = {"layout": "tabs", "slots": []}   # the default desktop's terminals, kept as you go
+        self.last_workspace = ""                # the desktop shown when the launcher last ran ("" = default)
+        self.confirm_reload = True              # ask before reloading a terminal
+        self.confirm_send = True                # ask before sending the input bar's text
         self.external_terminal = False        # open terminals in separate console windows instead of the workspace
         self.workspace_layout = "tabs"
         self.project_tags: list[str] = []      # tag filter last used on the Projects page
@@ -73,7 +92,7 @@ class UiPrefs:
         self.composer_position = "bottom"
         self.toast_anchor: list[float] | None = None   # [x_ratio, y_ratio] in the window; None = default corner
         self.update_check = True                # look for newer launcher versions in the background
-        self.sessions_grouping = "project"      # Sessions page: grouped by "project" or one list by "time"
+        self.sessions_grouping = "workspace"    # Sessions page: workspace > project > terminal, or one list by "time"
         self._load()
 
     def _load(self) -> None:
@@ -83,8 +102,6 @@ class UiPrefs:
             return
         if not isinstance(data, dict):
             return
-        version = data.get("version")
-        self.version = max(version, PREFS_VERSION) if type(version) is int else PREFS_VERSION
         self.sidebar_collapsed = bool(data.get("sidebar_collapsed", False))
         self.external_terminal = bool(data.get("external_terminal", False))
         self.workspace_layout = data.get("workspace_layout") if data.get("workspace_layout") in {"tabs", "grid"} else "tabs"
@@ -95,6 +112,13 @@ class UiPrefs:
         self.pinned = {p for p in pinned if isinstance(p, str)} if isinstance(pinned, list) else set()
         from .project_icons import valid_entries
         self.project_icons = valid_entries(data.get("project_icons", {}))
+        self.workspace_icons = valid_entries(data.get("workspace_icons", {}))
+        self.default_workspace_name = valid_workspace_name(data.get("default_workspace_name"))
+        self.default_workspace = valid_desktop(data.get("default_workspace"))
+        last = data.get("last_workspace")
+        self.last_workspace = last if isinstance(last, str) and len(last) <= 128 and "@" not in last else ""
+        self.confirm_reload = data.get("confirm_reload", True) is not False
+        self.confirm_send = data.get("confirm_send", True) is not False
         self.theme = data.get("theme") if data.get("theme") in THEMES else "deep-sea"
         self.accent = valid_color(data.get("accent"))
         size = data.get("terminal_font_size")
@@ -115,11 +139,7 @@ class UiPrefs:
             self.shortcuts = {}
         self.toast_anchor = valid_anchor(data.get("toast_anchor"))
         self.update_check = data.get("update_check", True) is not False
-        self.sessions_grouping = "time" if data.get("sessions_grouping") == "time" else "project"
-        known = self.snapshot()
-        self._extra = {k: v for k, v in data.items() if k not in known and k != "version"}
-        self._raw = {k: data[k] for k in known if k in data}
-        self._loaded = known
+        self.sessions_grouping = "time" if data.get("sessions_grouping") == "time" else "workspace"
 
     def snapshot(self) -> dict:
         """The known preferences in their stored (JSON) form."""
@@ -127,6 +147,10 @@ class UiPrefs:
                 "external_terminal": self.external_terminal, "workspace_layout": self.workspace_layout,
                 "project_tags": list(self.project_tags), "workspace_tags": list(self.workspace_tags),
                 "project_icons": {k: dict(v) for k, v in sorted(self.project_icons.items())},
+                "workspace_icons": {k: dict(v) for k, v in sorted(self.workspace_icons.items())},
+                "default_workspace_name": valid_workspace_name(self.default_workspace_name),
+                "default_workspace": valid_desktop(self.default_workspace), "last_workspace": self.last_workspace,
+                "confirm_reload": bool(self.confirm_reload), "confirm_send": bool(self.confirm_send),
                 "theme": self.theme, "accent": self.accent, "terminal_font_size": self.terminal_font_size,
                 "ui_font": valid_font_family(self.ui_font), "terminal_font": valid_font_family(self.terminal_font),
                 "ui_scale": valid_ui_scale(self.ui_scale), "cursor_blink": self.cursor_blink, "composer_default": self.composer_default,
@@ -135,13 +159,7 @@ class UiPrefs:
                 "sessions_grouping": self.sessions_grouping}
 
     def save(self) -> None:
-        current = self.snapshot()
-        payload = dict(self._extra)
-        for key, value in current.items():
-            # Untouched here -> keep exactly what was on disk (a newer build may have stored a value we cannot use).
-            payload[key] = self._raw[key] if key in self._raw and value == self._loaded.get(key) else value
-        payload["version"] = max(self.version, PREFS_VERSION)
         try:
-            runtime.write_json(self.path, payload)
+            runtime.write_json(self.path, self.snapshot())
         except OSError:
             pass  # View preferences are best-effort; never block the UI on them.

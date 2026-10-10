@@ -83,25 +83,34 @@ Data lives in `%LOCALAPPDATA%\VibeLauncher` (override with `VIBE_LAUNCHER_HOME`)
 Useful keys: `Ctrl+K` command palette, `Ctrl+,` settings, `Ctrl+Tab` next terminal, `Ctrl+=` / `Ctrl+-` terminal text
 size, `Ctrl+Shift+Space` keyboard navigation. All shortcuts can be changed in **Settings → Keyboard shortcuts**.
 
-![Projects: every workspace of a project, its status, and one-click restore](docs/images/projects-en.png)
+![Projects: every session of a project, the workspaces it is in, its status, and one-click restore](docs/images/projects-en.png)
 
 ## 3. Features
 
-- **Isolated accounts**: one `CODEX_HOME` / `CLAUDE_CONFIG_DIR` per account; optional one-off import of your skills,
-  hooks, agents and conversations (copied from an allow-list, never credentials).
+- **Isolated accounts**: one `CODEX_HOME` / `CLAUDE_CONFIG_DIR` per account; automatically discover the execution
+  environment's user skills, plugins and conversations on launch, with native project discovery and isolated credentials.
 - **Local and SSH environments**: status cards (host trust, auth mode, agent, CLI versions), remote folder browser,
   optional SSH password caching in Windows Credential Manager, CLI version check and update.
-- **Projects**: tags and filters, favourites, custom project icons (glyph, picture or recoloured SVG), a drawer listing
-  every workspace a project has, and one-click **recall** (re-attach running work, reopen stopped work).
+- **Projects**: tags and filters (including by workspace), favourites, custom project icons (glyph, picture or
+  recoloured SVG), the workspaces a project is in, **Open in workspace…**, a drawer listing every session a project has
+  grouped by workspace, a **Restorable** badge after a restart, and one-click **restore** (return to the project's
+  workspace, re-attach tmux work and continue the last Codex / Claude conversation).
 - **Workspace**: xterm.js terminals in tabs or a grid, a native input bar for IME input (e.g. Chinese), quick open per
-  project, saved workspace layouts, shell / CLI profile choice, zoomable text.
+  project, named desktops containing multiple projects, each with its own name and icon (the default one too), a
+  workspace switcher that preserves running terminals, workspaces saved as you open and close terminals (a forced
+  close loses nothing; **Restore N terminals** brings them back after a restart, never automatically), a **Reload**
+  button per terminal, optional confirmation before reloading or sending from the input bar, shell / CLI profile
+  choice, zoomable text.
+- **Home**: what is running, accounts that need signing in, a card per workspace (projects, open and running
+  terminals; click to switch), recent projects (with **Restore** for the ones waiting in a workspace) and environments.
 - **Sessions**: every run with its real status (from the remote supervisor's exit code, not terminal output); bulk
-  stop / clean-up, grouped by project or time.
+  stop / clean-up, grouped as workspace › project › terminal, or listed by time.
 - **Integrations**: GitHub account and commit identity per project (official `gh`), Codex quota view,
   DeepSeek Harness Web (experimental).
 - **Customisation**: 8 colour themes and accent colours, separate interface and terminal fonts, interface scale (80–200%), English / 繁體中文 / 简体中文 / 日本語 / 한국어 / Deutsch / Español UI,
   CLI plugin manifests in `settings.json`.
-- **Safe updates**: checks git tags, backs up the database and settings, then `git pull --ff-only` + `uv sync`.
+- **Safe updates**: the installed app updates from GitHub Releases (checksum verified); a git checkout compares tags
+  and runs `git pull --ff-only` + `uv sync`. Both back up the database and settings first.
 
 <table>
   <tr>
@@ -129,7 +138,8 @@ Confirmed and not yet built:
 Choose the interface language in **Settings → General → Interface language**, then restart the launcher. English is the default. UI text is maintained in `src/vibe_launcher/locales/`: `en`, `zh-TW`, `zh-CN`, `ja`, `ko`, `de` and `es`. The translation checker validates every registered catalog's keys, format fields and HTML markup.
 
 ```powershell
-uv run --group dev pytest -q
+$env:QT_QPA_PLATFORM = "offscreen"
+uv run --group dev pytest -q --basetemp="$env:TEMP/vibe-launcher-tests" -p no:cacheprovider -o faulthandler_timeout=90
 uv run python scripts/check_translations.py
 ```
 

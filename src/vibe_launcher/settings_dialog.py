@@ -227,6 +227,13 @@ class SettingsDialog(QDialog):
         self.position.setCurrentIndex(self.position.findData(self.window.prefs.composer_position))
         self.position.setAccessibleName(tr("Input bar position"))
         form.addRow(tr("Input bar position"), self.position)
+        form = _group(layout, tr("Confirmations"))
+        self.confirm_reload = QCheckBox(tr("Ask before reloading a terminal"))
+        self.confirm_reload.setChecked(getattr(self.window.prefs, "confirm_reload", True))
+        form.addRow(self.confirm_reload)
+        self.confirm_send = QCheckBox(tr("Ask before sending from the input bar"))
+        self.confirm_send.setChecked(getattr(self.window.prefs, "confirm_send", True))
+        form.addRow(self.confirm_send)
         layout.addStretch(1)
         self.stack.addWidget(page)
 
@@ -361,6 +368,8 @@ class SettingsDialog(QDialog):
             prefs.shortcuts = {k: v for k, v in bindings.items() if v != shortcuts.DEFAULTS[k]}
             prefs.composer_position = self.position.currentData()
             prefs.external_terminal = self.external.isChecked()
+            prefs.confirm_reload = self.confirm_reload.isChecked()
+            prefs.confirm_send = self.confirm_send.isChecked()
             scale_changed = self.ui_scale.currentData() != getattr(prefs, "ui_scale", 100)
             prefs.ui_scale = self.ui_scale.currentData()
             if hasattr(prefs, "update_check"):

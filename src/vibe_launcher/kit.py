@@ -1222,16 +1222,22 @@ class _IconTile(QWidget):
         self._size, self._icon_size, self._radius = size, icon_size, radius
         self._name, self._color, self._bg = "server", "text_secondary", ("border", 0.12)
         self._project: str | None = None
+        self._custom: tuple[dict, str, str] | None = None
         self.setFixedSize(size, size)
 
     def set_project(self, project_id: str) -> None:
         """Show this project's own icon (glyph, SVG or picture; see ``project_icons``)."""
-        self._project = project_id
+        self._project, self._custom = project_id, None
+        self.update()
+
+    def set_custom(self, entry: dict | None, hue: str, glyph: str) -> None:
+        """Show a chosen icon entry (a workspace's), with ``glyph`` in ``hue`` when nothing was chosen."""
+        self._project, self._custom = None, (dict(entry or {}), hue, glyph)
         self.update()
 
     def set_icon(self, name: str, color: str = "accent", bg: tuple[str, float] | None = None) -> None:
         """``color`` and ``bg`` (colour, alpha) take theme token names so the tile follows a theme switch."""
-        self._project = None
+        self._project, self._custom = None, None
         self._name, self._color = name, color
         self._bg = (color, TINT_A) if bg is None else bg
         self.update()
@@ -1239,10 +1245,11 @@ class _IconTile(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        if self._project is not None:
+        if self._project is not None or self._custom is not None:
             from . import project_icons
-            project_icons.draw(p, QRectF(self.rect()), self._project, dpr=max(2.0, self.devicePixelRatioF()),
-                               radius=self._radius)
+            entry, hue, glyph = self._custom if self._custom is not None else (None, "", "folder")
+            project_icons.draw(p, QRectF(self.rect()), self._project or "", entry=entry, hue=hue, glyph=glyph,
+                               dpr=max(2.0, self.devicePixelRatioF()), radius=self._radius)
             return
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(qcolor(resolve(self._bg[0]), self._bg[1]))
@@ -1603,7 +1610,8 @@ class ConfirmDialog(QDialog):
     """Modal confirmation with a clear safe default. Destructive confirmations are red."""
 
     def __init__(self, parent: QWidget | None, title: str, message: str, *, confirm_text: str = tr('kit.dce52f3e1119'),
-                 cancel_text: str = tr('kit.2cd0f3be8738'), danger: bool = False, icon_name: str | None = None):
+                 cancel_text: str = tr('kit.2cd0f3be8738'), danger: bool = False, icon_name: str | None = None,
+                 dont_ask: bool = False):
         super().__init__(parent, Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setModal(True)
@@ -1642,6 +1650,11 @@ class ConfirmDialog(QDialog):
         head.addLayout(text, 1)
         body.addLayout(head)
         body.addSpacing(S.sm)
+        self.dont_ask = None
+        if dont_ask:                       # routine confirmations the user may switch off (back on in Settings)
+            from PySide6.QtWidgets import QCheckBox
+            self.dont_ask = QCheckBox(tr("Don't ask again"))
+            body.addWidget(self.dont_ask)
         buttons = QHBoxLayout()
         buttons.setSpacing(S.sm)
         buttons.addStretch(1)
@@ -1665,6 +1678,18 @@ class ConfirmDialog(QDialog):
             center = window.geometry().center()
             dialog.move(center.x() - dialog.width() // 2, center.y() - dialog.height() // 2)
         return dialog.exec() == QDialog.DialogCode.Accepted
+
+    @staticmethod
+    def ask_skippable(parent: QWidget | None, title: str, message: str, **kwargs: Any) -> tuple[bool, bool]:
+        """(confirmed, don't ask again): the box is only honoured together with a confirmation."""
+        dialog = ConfirmDialog(parent, title, message, dont_ask=True, **kwargs)
+        if parent is not None:
+            window = parent.window()
+            dialog.adjustSize()
+            center = window.geometry().center()
+            dialog.move(center.x() - dialog.width() // 2, center.y() - dialog.height() // 2)
+        confirmed = dialog.exec() == QDialog.DialogCode.Accepted
+        return confirmed, confirmed and dialog.dont_ask.isChecked()
 
 
 # --------------------------------------------------------------------------- command palette
@@ -1873,6 +1898,7 @@ class CommandPalette(QDialog):
 BADGE_ROLE = int(Qt.ItemDataRole.UserRole) + 1   # item data: (label, tone) drawn as a status pill on the right
 ICON_ROLE = int(Qt.ItemDataRole.UserRole) + 5    # item data: (icon name, colour token) drawn as a quiet tile on the left
 GROUP_ROLE = int(Qt.ItemDataRole.UserRole) + 6   # item data: group key; the row is a heading drawn by its own widget
+INDENT_ROLE = int(Qt.ItemDataRole.UserRole) + 7  # item data: left indent in pixels (a row nested under headings)
 
 
 class TwoLineDelegate(QStyledItemDelegate):
@@ -1894,7 +1920,7 @@ class TwoLineDelegate(QStyledItemDelegate):
         lines = self._lines(index)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(option.rect).adjusted(2, 1, -2, -1)
+        rect = QRectF(option.rect).adjusted(2 + int(index.data(INDENT_ROLE) or 0), 1, -2, -1)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
         painter.setPen(Qt.PenStyle.NoPen)

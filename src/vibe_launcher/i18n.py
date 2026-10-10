@@ -41,6 +41,11 @@ def language() -> str:
     return _language
 
 
+def join_names(names: list[str]) -> str:
+    """A short list of names, joined the way the current language writes lists."""
+    return ("、" if _language.startswith(("zh", "ja")) else ", ").join(names)
+
+
 def set_language(value: str) -> None:
     global _language
     if value not in LANGUAGES:

@@ -60,8 +60,6 @@ STATUSES = {"update_available", "current", "unavailable"}
 TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
 SEMVER = re.compile(r"\d+\.\d+\.\d+")
 SECTION = re.compile(r"^##\s+\[([^\]]+)\](?:\s*[-–—]\s*(\S+))?\s*$")
-SETTINGS_HEADING = "設定變更"
-CHANGE = re.compile(r"^(移除|變更)\s*[:：]\s*(.+?)\s*$")
 BACKUP_DIR = re.compile(r"^[0-9A-Za-z.+_-]+-(\d{8}T\d{6}Z)(?:-(\d+))?$")
 
 
@@ -81,22 +79,19 @@ def repo_root() -> Path | None:
 
 
 def parse_changelog(text: str, *, include_unreleased: bool = False) -> dict[str, dict]:
-    """``## [x.y.z] - date`` sections -> {version: {"date", "notes", "settings_changes"}}.
+    """``## [x.y.z] - date`` sections -> {version: {"date", "notes"}}: every bullet is a release note.
 
-    Bullets under ``### 設定變更`` of the form ``- 移除: key`` / ``- 變更: key（說明）`` become settings changes;
-    every other bullet is a release note. The ``[Unreleased]`` section is skipped unless asked for.
+    The ``[Unreleased]`` section is skipped unless asked for.
     """
     releases: dict[str, dict] = {}
     entry: dict | None = None
-    in_settings = False
     for line in text.splitlines():
         stripped = line.strip()
         match = SECTION.match(stripped)
         if match:
             name = match.group(1).strip()
-            in_settings = False
             if SEMVER.fullmatch(name) or (include_unreleased and name.lower() == "unreleased"):
-                entry = releases.setdefault(name, {"date": match.group(2) or "", "notes": [], "settings_changes": []})
+                entry = releases.setdefault(name, {"date": match.group(2) or "", "notes": []})
             else:
                 entry = None
             continue
@@ -106,29 +101,13 @@ def parse_changelog(text: str, *, include_unreleased: bool = False) -> dict[str,
         if entry is None:
             continue
         if stripped.startswith("###"):
-            in_settings = stripped.lstrip("#").strip() == SETTINGS_HEADING
             continue
         if not stripped.startswith(("- ", "* ")):
             continue
         item = stripped[2:].strip()
-        if not item:
-            continue
-        change = CHANGE.match(item) if in_settings else None
-        if change:
-            key, detail = _split_detail(change.group(2))
-            entry["settings_changes"].append({"kind": "removed" if change.group(1) == "移除" else "changed",
-                                              "key": key, "detail": detail})
-        else:
+        if item:
             entry["notes"].append(item)
     return releases
-
-
-def _split_detail(value: str) -> tuple[str, str]:
-    for opening, closing in (("（", "）"), ("(", ")")):
-        if value.endswith(closing) and opening in value:
-            index = value.index(opening)
-            return value[:index].strip(), value[index + 1:-1].strip()
-    return value.strip(), ""
 
 
 def _git_env() -> dict:
@@ -198,8 +177,7 @@ def _check(repo: Path | None, current: str, fetch: bool) -> dict:
     for number in sorted(tags, reverse=True)[:MAX_RELEASES]:
         version = "%d.%d.%d" % number
         entry = _release_notes(git, repo, tags[number]).get(version, {})
-        releases.append({"version": version, "date": entry.get("date", ""), "notes": entry.get("notes", []),
-                         "settings_changes": entry.get("settings_changes", [])})
+        releases.append({"version": version, "date": entry.get("date", ""), "notes": entry.get("notes", [])})
     if not releases:
         return {"status": "current", "latest": current, "message": "已是最新版本。"}
     return {"status": "update_available", "latest": releases[0]["version"], "releases": releases,
@@ -255,7 +233,6 @@ def _latest_releases(repo: str, installed: tuple[int, int, int]) -> list[dict]:
         date = str(item.get("published_at") or "")[:10]
         notes = parse_changelog(f"## [{version}] - {date}\n" + str(item.get("body") or "")).get(version, {})
         found.append({"version": version, "date": date, "notes": notes.get("notes", []),
-                      "settings_changes": notes.get("settings_changes", []),
                       "installer_url": installer["browser_download_url"], "sums_url": sums["browser_download_url"]})
     return sorted(found, key=lambda r: runtime.version_number(r["version"]), reverse=True)[:MAX_RELEASES]
 
@@ -267,7 +244,7 @@ def _check_release(current: str) -> dict:
         return {"message": "無法連線到更新來源，請稍後再試。"}
     if not found:
         return {"status": "current", "latest": current, "message": "已是最新版本。"}
-    releases = [{k: r[k] for k in ("version", "date", "notes", "settings_changes")} for r in found]
+    releases = [{k: r[k] for k in ("version", "date", "notes")} for r in found]
     return {"status": "update_available", "latest": releases[0]["version"], "releases": releases,
             "message": f"有新版本 {releases[0]['version']} 可以更新。"}
 
@@ -329,13 +306,6 @@ def apply_release(data_root: Path) -> int:
         print(f"備份失敗，已停止更新：{type(error).__name__}")
         return 3
     print(f"    已備份到 {folder}")
-    changes = settings_changes({"releases": found})
-    if changes:
-        print("注意：新版本會移除或變更下列設定（現有設定檔不會被改寫，但新版本可能不再使用）：")
-        for change in changes:
-            kind = "移除" if change["kind"] == "removed" else "變更"
-            detail = f"（{change['detail']}）" if change["detail"] else ""
-            print(f"    [{change['version']}] {kind}: {change['key']}{detail}")
     print("3/4 下載安裝程式並驗證…", flush=True)
     name = f"Vibe-Launcher-Setup-{release['version']}.exe"
     downloads = data_root / UPDATES_DIR
@@ -376,11 +346,7 @@ def _strings(value: object, limit: int = 200) -> bool:
 def _valid_release(item: object) -> bool:
     if not isinstance(item, dict) or not isinstance(item.get("version"), str) or not SEMVER.fullmatch(item["version"]):
         return False
-    changes = item.get("settings_changes")
-    return (isinstance(item.get("date"), str) and _strings(item.get("notes"))
-            and isinstance(changes, list) and len(changes) <= 200
-            and all(isinstance(c, dict) and c.get("kind") in {"removed", "changed"}
-                    and isinstance(c.get("key"), str) and isinstance(c.get("detail"), str) for c in changes))
+    return isinstance(item.get("date"), str) and _strings(item.get("notes"))
 
 
 def load_cached(data_root: Path) -> dict | None:
@@ -395,12 +361,6 @@ def load_cached(data_root: Path) -> dict | None:
             or not all(_valid_release(r) for r in data["releases"])):
         return None
     return {k: data[k] for k in ("status", "current", "latest", "releases", "checked_at", "message")}
-
-
-def settings_changes(result: dict | None) -> list[dict]:
-    """Every settings removal/change across the pending releases, tagged with the version that makes it."""
-    return [{**change, "version": release["version"]}
-            for release in (result or {}).get("releases", []) for change in release.get("settings_changes", [])]
 
 
 def working_tree_clean(repo: Path) -> tuple[bool, str]:
@@ -496,13 +456,6 @@ def apply(repo: Path, data_root: Path) -> int:
         print(f"備份失敗，已停止更新：{type(error).__name__}")
         return 3
     print(f"    已備份到 {folder}")
-    changes = settings_changes(load_cached(data_root))
-    if changes:
-        print("注意：新版本會移除或變更下列設定（現有設定檔不會被改寫，但新版本可能不再使用）：")
-        for change in changes:
-            kind = "移除" if change["kind"] == "removed" else "變更"
-            detail = f"（{change['detail']}）" if change["detail"] else ""
-            print(f"    [{change['version']}] {kind}: {change['key']}{detail}")
     print("3/4 下載更新（git pull --ff-only）…", flush=True)
     try:
         pulled = subprocess.call([git, "-C", str(repo), "pull", "--ff-only"], env=_git_env())

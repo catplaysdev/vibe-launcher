@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -77,6 +78,11 @@ def seed(store) -> None:
     for session_id, project, account, environment, status, hours, path in sessions:
         store.save("sessions", {"id": session_id, "preset_id": project, "account_id": account, "environment_id": environment,
                                 "name": project, "path": path, "status": status, "updated_at": iso(hours), "persistent": True})
+    store.save("workspaces", {"id": "site", "name": "Site work", "layout": "grid", "slots": [
+        {"preset_id": "site-analysis", "kind": "agent", "account_id": "lab"},
+        {"preset_id": "docs-portal", "kind": "agent", "account_id": "personal"}]})
+    store.save("workspaces", {"id": "data", "name": "Data", "layout": "tabs", "slots": [
+        {"preset_id": "data-pipeline", "kind": "agent", "account_id": "lab"}]})
 
 
 def fake_terminal(tool: str):
@@ -109,9 +115,9 @@ def render(lang: str) -> list[Path]:
     from vibe_launcher.ui import MainWindow
     from vibe_launcher.workspace_page import TabInfo
 
-    data = ROOT / ".local-test" / "readme-shots" / lang
-    shutil.rmtree(data, ignore_errors=True)
-    data.mkdir(parents=True)
+    base = ROOT / ".local-test" / "readme-shots"
+    base.mkdir(parents=True, exist_ok=True)
+    data = Path(tempfile.mkdtemp(prefix=lang + "-", dir=base))   # fresh per run: an older folder may belong to another user
     icons.BRAND_DIR = data / "no-brand-icons"           # generic glyphs only: no third-party logos in the pictures
     app = QApplication.instance() or QApplication([])
     from PySide6.QtGui import QFont
@@ -127,6 +133,14 @@ def render(lang: str) -> list[Path]:
         "data-pipeline": {"kind": "glyph", "name": "cpu", "color": "#FB923C"},
     })
     window._refresh_project_icons()
+    window.prefs.workspace_icons.update({
+        "site": {"kind": "glyph", "name": "crane", "color": "#FBBF24"},
+        "data": {"kind": "glyph", "name": "database", "color": "#FB923C"},
+        "@default": {"kind": "glyph", "name": "sparkles", "color": "#60A5FA"},
+    })
+    window._render_workspace()
+    window._render_projects()
+    window._render_home()
     window.resize(*SIZE)
     window.show()
     app.processEvents()
@@ -148,6 +162,7 @@ def render(lang: str) -> list[Path]:
     shot(window, "projects")
 
     window.show_page("workspace")
+    window.workspace.switch_workspace("site", "grid")      # the saved "Site work" desktop, without starting its slots
     window.workspace.set_layout("grid")
     for index, (tool, project, account, environment) in enumerate((("codex", "Site analysis", "Lab", "build-server"),
                                                                     ("claude", "Docs portal", "Personal", "build-server"))):
@@ -167,6 +182,7 @@ def render(lang: str) -> list[Path]:
     dialog.reject()
     window.workspace.shutdown()
     window.close()
+    shutil.rmtree(data, ignore_errors=True)
     return written
 
 

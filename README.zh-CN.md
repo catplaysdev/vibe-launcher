@@ -76,18 +76,19 @@ uv run vibe-launcher
 常用按键：`Ctrl+K` 命令面板、`Ctrl+,` 设置、`Ctrl+Tab` 下一个终端、`Ctrl+=`／`Ctrl+-` 终端文字大小、
 `Ctrl+Shift+Space` 键盘导航。所有快捷键都可在“设置 → 快捷键”中修改。
 
-![项目：列出项目的每个工作区及其状态，并可一键召回](docs/images/projects-zh-TW.png)
+![项目：列出项目的每个会话、所属工作区与状态，并可一键还原](docs/images/projects-zh-TW.png)
 
 ## 3. 功能
 
-- **账号隔离**：每个账号独立的 `CODEX_HOME`／`CLAUDE_CONFIG_DIR`；可手动导入你的 skills、hooks、agents 与对话（按白名单复制，不含凭据）。
+- **账号隔离**：每个账号独立的 `CODEX_HOME`／`CLAUDE_CONFIG_DIR`；启动时自动获取执行环境用户的 skills、plugins 与对话，项目局部数据由 CLI 正常读取，登录凭据保持隔离。
 - **本机与 SSH 环境**：状态卡片（主机信任、认证方式、agent、CLI 版本）、远程文件夹浏览、可选的 SSH 密码缓存（Windows 凭据管理器）、CLI 版本检查与更新。
-- **项目**：标签与筛选、收藏、自定义项目图标（内置图标、图片或可换色的 SVG）、列出项目所有工作区的抽屉，以及一键“召回”（重新连接仍在运行的、重新打开已停止的）。
-- **工作区**：xterm.js 终端，标签页或平铺；原生输入栏方便输入法（中文）输入；每个项目的快速打开；保存工作区布局；选择 shell／CLI；文字可缩放。
-- **会话**：每次运行的真实状态（依据远程监督进程的退出码，而不是终端输出）；批量停止／清理，可按项目或时间分组。
+- **项目**：标签与筛选（含按工作区筛选）、收藏、自定义项目图标（内置图标、图片或可换色的 SVG）、显示项目所属的工作区、“打开到工作区…”、按工作区分组列出项目所有会话的抽屉、重启后的“可恢复”标记，以及一键还原（回到项目所在的工作区，tmux 任务重新连接、Codex／Claude 接续上次对话）。
+- **工作区**：xterm.js 终端，标签页或平铺；原生输入栏方便输入法（中文）输入；每个项目的快速打开；可命名的多项目桌面，每个工作区（含默认工作区）都有自己的名称与图标，切换工作区时保留终端与运行状态；打开或关闭终端时自动保存工作区（强制关闭也不丢失，重启后点“恢复 N 个终端”带回，不会自动启动）；每个终端有“重新加载”；重新加载与输入栏发送前可选择是否确认；选择 shell／CLI；文字可缩放。
+- **首页**：运行中的任务、需要重新登录的账号、每个工作区一张卡片（项目数、打开与运行中的终端，点一下即切换）、最近项目（在工作区等待恢复的可直接“恢复”）与环境。
+- **会话**：每次运行的真实状态（依据远程监督进程的退出码，而不是终端输出）；批量停止／清理，按“工作区 › 项目 › 终端”分层，或按时间列出。
 - **集成**：每个项目的 GitHub 账号与 commit 身份（官方 `gh`）、Codex 额度查询、DeepSeek Harness Web（实验性）。
 - **个性化**：8 套主题与强调色、界面字体与终端字体（可分别选择）、界面缩放（80–200%）、英语／繁体中文／简体中文／日语／韩语／德语／西班牙语界面、`settings.json` 中的 CLI 扩展 manifest。在“设置 → 常规 → 界面语言”中选择语言，重启启动器后生效。
-- **安全更新**：比对 git tag，先备份数据库与设置，再执行 `git pull --ff-only` + `uv sync`。
+- **安全更新**：安装版从 GitHub Releases 更新（核对 SHA-256）；git checkout 比对 tag 后执行 `git pull --ff-only` + `uv sync`。两者都会先备份数据库与设置。
 
 <table>
   <tr>
@@ -112,7 +113,8 @@ uv run vibe-launcher
 界面文案集中维护在 `src/vibe_launcher/locales/` 目录，翻译检查器会校验各语言键值、格式占位符和 HTML 标签的一致性。
 
 ```powershell
-uv run --group dev pytest -q
+$env:QT_QPA_PLATFORM = "offscreen"
+uv run --group dev pytest -q --basetemp="$env:TEMP/vibe-launcher-tests" -p no:cacheprovider -o faulthandler_timeout=90
 uv run python scripts/check_translations.py
 ```
 

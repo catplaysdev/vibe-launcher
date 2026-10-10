@@ -1,12 +1,13 @@
-"""Project page: the drawer listing every workspace (session) a project has.
+"""Project page: the drawer listing every session a project has.
 
 A project can be opened many times (Codex here, Claude there, a shell on the server...). The list row only has room
-for one status, so the details panel carries this drawer: one line per workspace with its own status and actions.
+for one status, so the details panel carries this drawer: one line per session with its own status and actions.
+Sessions whose terminal is open are grouped under the workspace (desktop) that terminal is on.
 """
 
 from __future__ import annotations
 
-from .i18n import tr
+from .i18n import join_names, tr
 
 from dataclasses import dataclass
 
@@ -32,6 +33,7 @@ class WorkRow:
     can_stop: bool = False
     can_remove: bool = False
     can_restart: bool = False       # stopped: start it again the same way (same service, account and environment)
+    workspace: str = ""             # name of the workspace its open terminal is on
 
 
 class WorkDrawer(QWidget):
@@ -101,8 +103,13 @@ class WorkDrawer(QWidget):
         self.restore.setVisible(restorable > 0)
         self.restore.setText(tr('work_drawer.0e8fb1011d11', v0=f'{restorable}'))
         live = sum(1 for r in rows if r.badge[1] in {"ok", "info", "warn"} or r.can_stop)
+        places = list(dict.fromkeys(r.workspace for r in rows if r.tab_id and r.workspace))
         if rows:
-            text = tr('work_drawer.09d9999c00cf', v0=f'{len(rows)}', v1=f'{live}') + (tr('work_drawer.f3863aa3f25c', v0=f'{sum((1 for r in rows if r.tab_id))}') if any(r.tab_id for r in rows) else "")
+            text = tr('work_drawer.09d9999c00cf', v0=f'{len(rows)}', v1=f'{live}')
+            if places:
+                text += tr(" · {count} open in {workspaces}", count=sum(1 for r in rows if r.tab_id), workspaces=join_names(places))
+            elif any(r.tab_id for r in rows):
+                text += tr('work_drawer.f3863aa3f25c', v0=f'{sum((1 for r in rows if r.tab_id))}')
         else:
             text = tr('work_drawer.e276681df8d8')
         self.summary.setText(text)
@@ -121,8 +128,21 @@ class WorkDrawer(QWidget):
             hint.setWordWrap(True)
             self.body_layout.addWidget(hint)
             return
-        for row in rows:
-            self.body_layout.addWidget(self._row(row))
+        if not places:
+            for row in rows:
+                self.body_layout.addWidget(self._row(row))
+            return
+        for place in places + [""]:                    # each workspace's open sessions, then the ones not open anywhere
+            group = [r for r in rows if (r.workspace if r.tab_id else "") == place]
+            if not group:
+                continue
+            heading = QLabel(place or tr("Not open"))
+            heading.setProperty("role", "meta")
+            heading.setProperty("workGroup", place)
+            heading.setContentsMargins(S.xs, S.xs, 0, 0)
+            self.body_layout.addWidget(heading)
+            for row in group:
+                self.body_layout.addWidget(self._row(row))
 
     # -- one row -------------------------------------------------------------------------------
     def _row(self, row: WorkRow) -> QWidget:

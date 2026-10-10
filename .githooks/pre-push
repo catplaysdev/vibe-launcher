@@ -1,0 +1,21 @@
+#!/bin/sh
+# Only the shared branches go to GitHub: main (released), develop and hotfix (test versions) and vX.Y.Z tags.
+# Work branches (feat/dev_*, fix_*) stay on this computer. Enable once per clone:
+#   git config core.hooksPath .githooks
+zero=0000000000000000000000000000000000000000
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    case "$local_sha" in
+        "$zero" | 00000000*) continue ;;        # deleting a remote branch is always allowed (cleanup)
+    esac
+    case "$remote_ref" in
+        refs/heads/main | refs/heads/develop | refs/heads/hotfix) ;;
+        refs/tags/v[0-9]*.[0-9]*.[0-9]*) ;;
+        *)
+            echo "pre-push: refusing to push ${remote_ref#refs/heads/}: only main, develop, hotfix and vX.Y.Z tags go to GitHub." >&2
+            echo "          Merge feature (feat/dev_*) and fix (fix_*) branches locally into develop / hotfix instead." >&2
+            status=1
+            ;;
+    esac
+done
+exit $status

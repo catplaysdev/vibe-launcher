@@ -180,3 +180,33 @@ def test_clicking_the_icon_in_the_project_list_opens_the_picker(view, monkeypatc
     qtbot.mouseClick(listing.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(rect.left() + 120, rect.center().y()))
     qtbot.wait(100)
     assert opened == []                                                         # the rest of the row only selects
+
+
+def test_workspace_tiles_use_their_own_default_glyph_and_hue(qapp):
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QPainter
+
+    def tile(**kwargs):
+        image = QImage(64, 64, QImage.Format.Format_ARGB32)
+        image.fill(0)
+        painter = QPainter(image)
+        project_icons.draw(painter, QRectF(0, 0, 64, 64), entry={}, dpr=1.0, **kwargs)
+        painter.end()
+        return image
+    assert tile(glyph="briefcase", hue="info") != tile()
+    assert not project_icons.pixmap(None, 18, hue="info", glyph="briefcase").isNull()
+
+
+def test_the_name_field_refuses_empty_and_taken_names(view, qtbot):
+    dialog = ProjectIconDialog(view, "Site", None, title="Workspace", hue="info", glyph="briefcase",
+                               name_label="Name", taken={"Data"})
+    qtbot.addWidget(dialog)
+    dialog.name_field.setText("  ")
+    dialog.accept()
+    assert dialog.result() != QDialog.DialogCode.Accepted and dialog.error.isVisibleTo(dialog)
+    dialog.name_field.setText("data")
+    dialog.accept()
+    assert dialog.result() != QDialog.DialogCode.Accepted
+    dialog.name_field.setText("  Site   work ")
+    dialog.accept()
+    assert dialog.result() == QDialog.DialogCode.Accepted and dialog.result_name() == "Site work"

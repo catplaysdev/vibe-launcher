@@ -14,10 +14,15 @@ from pathlib import Path
 
 def run() -> dict:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from . import __version__, i18n, icons, selfcmd, terminal
+    from . import __version__, i18n, icons, runtime, selfcmd, terminal
     checks: dict[str, object] = {"version": __version__, "frozen": selfcmd.frozen()}
     checks["version_known"] = __version__ != "0.0.0"
     checks["runtime_source"] = selfcmd.runtime_source().startswith(b'"""') or len(selfcmd.runtime_source()) > 10000
+    source_code = compile(selfcmd.runtime_source(), "runtime.py", "exec")
+    shipped_function = next(c for c in source_code.co_consts if getattr(c, "co_name", "") == "sync_extensions")
+    checks["runtime_matches_source"] = runtime.sync_extensions.__code__.co_code == shipped_function.co_code
+    from .service import HISTORY_ONLY
+    checks["native_user_data"] = callable(runtime.sync_user_data) and {"sync_user_data", "native_codex_state"} <= HISTORY_ONLY
     checks["locales"] = all(i18n.catalog(code) for code in i18n.LANGUAGES)
     checks["helper_command"] = selfcmd.command("runner", "x")[-2:] == ["runner", "x"] if selfcmd.frozen() else True
     from PySide6.QtWidgets import QApplication

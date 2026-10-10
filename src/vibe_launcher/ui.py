@@ -8,7 +8,7 @@ come from ``kit`` / ``env_page`` and all styling from ``theme`` tokens.
 
 from __future__ import annotations
 
-from .i18n import tr
+from .i18n import join_names, tr
 
 from .i18n import tr
 
@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QProcess, QProcessEnvironment, Qt, QTimer, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QProcess, QProcessEnvironment, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -80,6 +80,8 @@ from .kit import (
     Sidebar,
     ToastManager,
     TwoLineDelegate,
+    dispose_widget,
+    label as text_label,
     later,
     make_button,
     retheme_widgets,
@@ -90,10 +92,14 @@ from .theme import C, R, S, Size, T, TOOL_ICONS, section_hue
 TOOL_NAMES = {"codex": "Codex", "claude": "Claude", "deepseek-harness": tr('ui.f241687ec5a7')}
 from .work_drawer import WorkDrawer, WorkRow
 from . import project_icons
-from .workspace_page import WorkspacePage
+from .workspace_page import DEFAULT_ICON_KEY, WORKSPACE_GLYPH, WorkspacePage
 from .ui_format import _display_time, _value
 from .ui_integrations import IntegrationActions
 from .ui_sessions import SessionActions
+
+# Projects page workspace filter values that are not desktop ids ("" is the default desktop; saved ids never contain "@").
+ALL_WORKSPACES = "@all"
+NO_WORKSPACE = "@none"
 
 
 class RecordDialog(QDialog):
@@ -140,7 +146,7 @@ class RecordDialog(QDialog):
             form.addRow(label, widget)
         for key, label in checkboxes or []:
             widget = QCheckBox(label)
-            widget.setChecked(bool(values.get(key, key == "share_extensions")))
+            widget.setChecked(bool(values.get(key, False)))
             self.fields[key] = widget
             form.addRow(widget)
         root.addLayout(form)
@@ -197,7 +203,7 @@ class RecordDialog(QDialog):
             elif isinstance(widget, QLineEdit):
                 widget.setText(_value(values, key))
             elif isinstance(widget, QCheckBox):
-                widget.setChecked(bool(values.get(key, key == "share_extensions")))
+                widget.setChecked(bool(values.get(key, False)))
         if self.draft is not None:
             self.draft.clear()
 
@@ -380,17 +386,11 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         self.tunnels = TunnelManager(store.path.parent)
         self._build()
         self.reload()
+        self._restore_last_desktop()
         self.timer = QTimer(self)
         self.timer.setInterval(2000)
         self.timer.timeout.connect(self._poll)
         self.timer.start()
-        if getattr(store, "readonly", False):
-            # A newer launcher wrote this database: show it, but never write to it (see store.SCHEMA_VERSION).
-            self._toast(tr("The database was created by a newer version of Vibe Launcher; this version can only read it."), "danger")
-        for account in ([] if getattr(store, "readonly", False) else self._records.get("accounts", [])):
-            if account.get("manual_import_notice"):
-                self._toast(tr('ui.42bf1eb0ab62'), "warn")
-                self.store.save("accounts", {**account, "manual_import_notice": False})
 
     # ------------------------------------------------------------------ build
     def _prime_gpu_composition(self) -> None:
@@ -480,17 +480,21 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
 
     def _startup_housekeeping(self) -> None:
         """Tidy the session history and tell the user what the last run left behind (they would not otherwise know)."""
-        if getattr(self.store, "readonly", False):
-            return
         try:
+            # Listed before the database is read: a launch starting right now already has its row, so its record
+            # can never be mistaken for one left behind.
+            worker_records = sorted((self.store.path.parent / "sessions").glob("*.json"))
             self._records["sessions"] = self.store.list("sessions")
             self._reap_closed_terminals()
+            live = {s["id"] for s in self._records["sessions"] if _value(s, "status") not in {"ended", "failed"}}
+            local = {e["id"] for e in self._records.get("environments", []) if e.get("kind") == "local"}
+            runner_module.end_stale_records(worker_records, live, local)
+            self._prune_local_finished()
             finished = sorted((s for s in self._records["sessions"] if _value(s, "status") in {"ended", "failed"}),
                               key=lambda s: _value(s, "updated_at"), reverse=True)
             for session in finished[self.FINISHED_KEPT:]:
                 self.store.delete("sessions", session["id"])
-            self._records["sessions"] = self.store.list("sessions")
-            self._render_sessions()
+            self.reload()                     # every page, not just Sessions: Home and Projects showed the old states
             counts = self._session_counts()
         except Exception:
             return
@@ -620,6 +624,11 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         self.sort.currentIndexChanged.connect(self._render_projects)
         self.favorite_filter = QCheckBox(tr('ui.bff836d78d5a'))
         self.favorite_filter.stateChanged.connect(self._render_projects)
+        self.project_workspace_filter = QComboBox()
+        self.project_workspace_filter.setAccessibleName(tr("Filter by workspace"))
+        self.project_workspace_filter.setMaximumWidth(220)
+        self.project_workspace_filter.addItem(tr("All workspaces"), ALL_WORKSPACES)
+        self.project_workspace_filter.currentIndexChanged.connect(self._render_projects)
         header.add_action(self.search, 1)
         header.add_action(make_button(tr('ui.4efd9b7b6756'), "primary", "plus", callback=lambda *_: self.add_project()))
         root.addWidget(header)
@@ -631,6 +640,7 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         filters.setSpacing(S.md)
         filters.addWidget(self.tag_bar, 1)
         filters.addWidget(self.favorite_filter)
+        filters.addWidget(self.project_workspace_filter)
         filters.addWidget(self.sort)
         root.addLayout(filters)
 
@@ -696,11 +706,20 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         title_row.addWidget(self.project_tile, 0, Qt.AlignmentFlag.AlignTop)
         title_row.addWidget(self.project_title, 1)
         details.addLayout(title_row)
+        self.project_workspaces_host = QWidget()           # the desktops this project is in; a click switches to one
+        self.project_workspaces = FlowLayout(self.project_workspaces_host, S.xs, S.xs)
+        self.project_workspaces.setContentsMargins(0, 0, 0, 0)
+        details.addWidget(self.project_workspaces_host)
         details.addWidget(info_scroll, 1)
         actions_host = QWidget()
         actions = FlowLayout(actions_host, S.sm, S.sm)
         actions.setContentsMargins(0, 0, 0, 0)
         actions.addWidget(make_button(tr('ui.0748e3c5fd75'), "primary", "terminal", callback=lambda *_: self.launch_project()))
+        self.open_in_workspace_button = make_button(tr("Open in workspace…"), "secondary", WORKSPACE_GLYPH,
+                                                    tip=tr("Open this project on the current, another or a new workspace"))
+        self.open_in_workspace_button.clicked.connect(
+            lambda *_: self._menu(self.open_in_workspace_button, self._open_in_workspace_actions()))
+        actions.addWidget(self.open_in_workspace_button)
         actions.addWidget(make_button(tr('ui.9f7cfab95388'), "secondary", "square-terminal", tip=tr('ui.769a81b48ac2'),
                                       callback=lambda *_: self.open_shell()))
         actions.addWidget(make_button(tr('ui.391babf73637'), "secondary", "activity", tip=tr('ui.40e450de4055'),
@@ -766,8 +785,8 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
                                          ("finished", tr("Finished"))])
         self.session_filter.changed.connect(lambda *_: self._render_sessions())
         toolbar.addWidget(self.session_filter)
-        self.session_grouping = FilterBar([("project", tr("By project")), ("time", tr("By time"))])
-        self.session_grouping.set_current(getattr(self.prefs, "sessions_grouping", "project"), emit=False)
+        self.session_grouping = FilterBar([("workspace", tr("By workspace")), ("time", tr("By time"))])
+        self.session_grouping.set_current(getattr(self.prefs, "sessions_grouping", "workspace"), emit=False)
         self.session_grouping.changed.connect(self.set_sessions_grouping)
         toolbar.addWidget(self.session_grouping)
         self.session_attach_button = make_button(tr('ui.3c1df1893978'), "primary", "terminal", callback=lambda *_: self.attach_session(),
@@ -811,6 +830,9 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
 
     # -- workspace -------------------------------------------------------------------------------
     def _build_workspace(self) -> QWidget:
+        self._incomplete_workspaces: set[str] = set()
+        self._desktops_ready = False      # nothing is saved before last time's desktops are offered back
+        self._pending_slots: dict[str, list[dict]] = {}     # last run's terminals not brought back yet, per desktop
         page = WorkspacePage(terminal_factory=self._terminal_factory)
         page.composer_default = self.prefs.composer_default
         page.composer_position = self.prefs.composer_position
@@ -829,10 +851,15 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         page.palette_requested.connect(self.open_palette)
         page.notify.connect(lambda message, tone: self._toast(message, tone))
         page.save_workspace_requested.connect(self.save_workspace)
+        page.new_workspace_requested.connect(self.new_workspace)
+        page.edit_workspace_requested.connect(self.edit_workspace)
+        page.restore_pending_requested.connect(self.restore_pending)
+        page.reload_requested.connect(self.reload_terminal)
+        page.prefs = self.prefs
         page.open_workspace_requested.connect(self.open_workspace)
         page.delete_workspace_requested.connect(self.delete_workspace)
         page.layout_changed.connect(self._remember_layout)
-        page.terminals_changed.connect(self._refresh_project_drawer)
+        page.terminals_changed.connect(self._on_terminals_changed)
         page.restore_requested.connect(self.restore_project)
         page.launcher.set_tag_filter(self.prefs.workspace_tags)
         page.launcher.tags_changed.connect(self._workspace_tags_changed)
@@ -841,6 +868,220 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
     def _remember_layout(self, mode: str) -> None:
         self.prefs.workspace_layout = mode
         self.prefs.save()
+        self._remember_workspaces()
+
+    def _on_terminals_changed(self) -> None:
+        """A terminal opened, closed or moved: the desktops are saved as they are now, and membership, the drawer and
+        the Home cards follow."""
+        self._remember_workspaces()
+        self._prune_local_finished()
+        self._render_projects()
+        self._refresh_project_drawer()
+        self._render_home()
+
+    # -- desktops are saved as you go, so a crash or a forced close loses nothing ---------------------------------
+    def _remember_workspaces(self) -> None:
+        if (not hasattr(self, "workspace") or not self._desktops_ready or self.workspace.shutting_down or getattr(self, "_closing", False)):
+            return
+        page = self.workspace
+        prefs_changed = False
+        for workspace_id in page.desktop_ids():
+            if not page.has_workspace(workspace_id) or workspace_id in self._incomplete_workspaces:
+                continue
+            slots = (page.slots(workspace_id) + self._pending_slots.get(workspace_id, []))[:16]
+            layout = page.desktop_layout(workspace_id)
+            if not workspace_id:
+                desktop = {"layout": layout, "slots": slots}
+                if desktop != self.prefs.default_workspace:
+                    self.prefs.default_workspace, prefs_changed = desktop, True
+                continue
+            record = self._by_id("workspaces", workspace_id)
+            if record and {**record, "layout": layout, "slots": slots} != record:
+                try:
+                    saved = self.store.save("workspaces", {**record, "layout": layout, "slots": slots})
+                except Exception as exc:
+                    self._error(tr('ui.12022293daa0'), exc)
+                    continue
+                self._records["workspaces"] = [saved if w.get("id") == workspace_id else w
+                                               for w in self._records.get("workspaces", [])]
+        last = page.workspace_id if self._by_id("workspaces", page.workspace_id) else ""
+        if last != self.prefs.last_workspace:
+            self.prefs.last_workspace, prefs_changed = last, True
+        if prefs_changed:
+            self.prefs.save()
+
+    def _prune_local_finished(self) -> None:
+        """Stopped local runs leave no record behind: the workspace remembers what to reopen, and nothing local can be
+        re-attached. A record whose terminal is still on screen stays until that terminal is closed."""
+        on_screen = {tab.info.session_id for tab in self.workspace.tabs()} if hasattr(self, "workspace") else set()
+        local = {e.get("id") for e in self._records.get("environments", []) if e.get("kind") == "local"}
+        gone = [s["id"] for s in self._records.get("sessions", []) if s.get("environment_id") in local
+                and s.get("status") in {"ended", "failed"} and s["id"] not in on_screen]
+        for session_id in gone:
+            try:
+                self.store.delete("sessions", session_id)
+                record = runtime_module.session_path(self.store.path.parent, session_id)
+                runtime_module.assert_private_path(record)
+                record.unlink(missing_ok=True)      # the worker's own copy goes too
+            except Exception:
+                continue
+        if gone:
+            self._records["sessions"] = self.store.list("sessions")
+
+    def _effective_sessions(self) -> list[dict[str, Any]]:
+        """Session records as the workspaces see them, so a project's "running" matches the open terminals: a session
+        runs while its terminal is open; on a server it may go on in tmux (background); local work without an open
+        terminal is over, whatever the last record said."""
+        sessions = self._records.get("sessions", [])
+        if not hasattr(self, "workspace"):
+            return sessions
+        alive = {tab.info.session_id for tab in self.workspace.tabs() if tab.info.session_id and tab.alive()}
+        local = {e.get("id") for e in self._records.get("environments", []) if e.get("kind") == "local"}
+        embedded = self._embedded_enabled()      # separate console windows are not tracked as tabs
+        result = []
+        for session in sessions:
+            status = session.get("status")
+            if session.get("id") in alive:
+                status = status if status in {"queued", "connecting", "waiting_auth"} else "running"
+            elif status in env_state.LIVE_STATUSES:
+                if session.get("environment_id") in local:
+                    status = "ended" if embedded else status
+                elif status == "running":
+                    # tmux keeps it on the server; run directly (no tmux) it ended with its terminal, as far as we know
+                    status = "detached" if session.get("persistent", True) is not False else "unknown"
+            result.append(session if status == session.get("status") else {**session, "status": status})
+        return result
+
+    def _restorable_projects(self) -> set[str]:
+        """Projects a workspace can bring back as they were (last run's terminals, or a saved desktop not opened yet)."""
+        if not hasattr(self, "workspace"):
+            return set()
+        page = self.workspace
+        found = {slot.get("preset_id", "") for slots in self._pending_slots.values() for slot in slots}
+        for record in self._records.get("workspaces", []):
+            if not page.has_workspace(record.get("id", "")):
+                found |= {slot.get("preset_id", "") for slot in record.get("slots", [])}
+        return found - {tab.info.preset_id for tab in page.tabs() if tab.alive()} - {""}
+
+    def _project_badge(self, preset_id: str, effective: list[dict[str, Any]], restorable: set[str]) -> tuple[str, str] | None:
+        badge = env_state.project_badge(preset_id, effective)
+        if preset_id in restorable and env_state.project_status(preset_id, effective) not in env_state.LIVE_STATUSES:
+            return tr("Restorable"), "info"
+        return badge
+
+    def _restore_last_desktop(self) -> None:
+        """At start: show the desktop used last time and offer its terminals (nothing starts by itself)."""
+        page = self.workspace
+        default = self.prefs.default_workspace
+        if default.get("slots") and default.get("layout", "tabs") != page.area.mode:
+            page.set_layout(default["layout"])
+        # The default desktop is always loaded, so its saved terminals wait here whatever desktop is shown; otherwise the
+        # first save would record it as empty and lose them. Separate-window mode keeps them too, only without the button.
+        pending = {"": list(default.get("slots", []))}
+        record = self._by_id("workspaces", self.prefs.last_workspace) if self.prefs.last_workspace else {}
+        if record:
+            page.switch_workspace(record["id"], record.get("layout", "tabs"))
+            pending[record["id"]] = list(record.get("slots", []))
+        embedded = self._embedded_enabled()
+        for workspace_id, slots in pending.items():
+            if slots:
+                self._pending_slots[workspace_id] = slots
+                page.set_pending(workspace_id, len(slots) if embedded else 0)
+        self._desktops_ready = True
+        self._render_projects()                 # projects that can come back say so
+        self._render_home()
+
+    def restore_pending(self, workspace_id: str) -> None:
+        slots = self._pending_slots.pop(workspace_id, [])
+        self.workspace.set_pending(workspace_id, 0)
+        if workspace_id != self.workspace.workspace_id:
+            self.open_workspace(workspace_id)
+        self._restore_slots(workspace_id, slots)
+        self._remember_workspaces()
+
+    def reload_terminal(self, tab_id: str) -> None:
+        """Start a terminal again in place: tmux work is re-attached, anything else restarts (agents resume)."""
+        page = self.workspace
+        tab = page.tab(tab_id)
+        if tab is None or not tab.info.preset_id:
+            return
+        info = tab.info
+        order = [t.info.id for t in page.current_tabs()]
+        position = order.index(tab_id) if tab_id in order else len(order)
+        before = set(order)
+        reattach = bool(info.tmux and info.session_id)
+
+        def drop_old() -> None:
+            tab.closing = "close"
+            if tab.alive():
+                tab.terminal.terminate()
+            page._remove(tab_id)
+            if info.local and info.session_id:      # its work ended with it; do not leave "queued"/"running" behind
+                self._end_local_sessions([info.session_id])
+
+        if reattach:
+            drop_old()                              # attaching to a session that is still shown would just switch to it
+            self._invoke("attach", session_id=info.session_id)
+        elif info.tool == "shell":
+            self.open_terminal(info.preset_id, "shell", "", "", info.terminal_profile)
+        else:
+            self.open_terminal(info.preset_id, "agent", info.account_id, "", resume=True)
+        added = [t.info.id for t in page.current_tabs() if t.info.id not in before and t.info.id != tab_id]
+        if not added:
+            if reattach:                            # keep it in the desktop: Restore tries again
+                shell = info.tool == "shell"
+                slot = {"preset_id": info.preset_id, "kind": "shell" if shell else "agent",
+                        **({"account_id": info.account_id} if info.account_id and not shell else {})}
+                self._pending_slots[page.workspace_id] = self._pending_slots.get(page.workspace_id, []) + [slot]
+                page.set_pending(page.workspace_id, len(self._pending_slots[page.workspace_id]))
+                self._remember_workspaces()
+            self._notice(tr("The terminal could not be started again; the old one was kept where possible."))
+            return
+        if not reattach:
+            drop_old()                              # only once the new terminal is there
+        page.place_tab(added[0], position)
+
+    # -- which projects each desktop holds ----------------------------------------------------------------
+    def _desktop_projects(self) -> dict[str, set[str]]:
+        """A loaded desktop holds what it would save right now; one not loaded yet (or only partly restored) its saved slots."""
+        page = self.workspace
+        result: dict[str, set[str]] = {}
+        for workspace_id in page.desktop_ids():
+            projects = {slot["preset_id"] for slot in page.slots(workspace_id) + self._pending_slots.get(workspace_id, [])}
+            if not page.has_workspace(workspace_id) or workspace_id in self._incomplete_workspaces:
+                record = self._by_id("workspaces", workspace_id) if workspace_id else {}
+                projects |= {slot.get("preset_id", "") for slot in record.get("slots", [])}
+            result[workspace_id] = {p for p in projects if p}
+        return result
+
+    def _workspace_membership(self) -> dict[str, list[str]]:
+        """Project id -> the desktops it is in, in picker order."""
+        members: dict[str, list[str]] = {}
+        for workspace_id, projects in self._desktop_projects().items():
+            for preset_id in projects:
+                members.setdefault(preset_id, []).append(workspace_id)
+        return members
+
+    def _workspace_cards(self) -> list[dict[str, Any]]:
+        page = self.workspace
+        projects = self._desktop_projects()
+        cards = []
+        for workspace_id in page.desktop_ids():
+            tabs = [tab for tab in page.desktop_tabs(workspace_id) if tab.info.kind in {"agent", "shell", "attach"}]
+            cards.append({"id": workspace_id, "name": page.workspace_name(workspace_id), "icon": page.icon_entry(workspace_id),
+                          "projects": len(projects.get(workspace_id, ())), "open": len(tabs),
+                          "running": sum(1 for tab in tabs if tab.alive()), "current": workspace_id == page.workspace_id,
+                          "editable": not workspace_id or bool(self._by_id("workspaces", workspace_id))})
+        return cards
+
+    def _apply_icon_choice(self, icons_by_key: dict[str, dict], key: str, old: dict | None, entry: dict | None) -> None:
+        """Keep ``entry`` as ``key``'s icon (None = the default) and delete the copied picture it replaces."""
+        if entry is None:
+            icons_by_key.pop(key, None)
+        else:
+            icons_by_key[key] = entry
+        if old and old["kind"] == "file" and old != entry and (entry or {}).get("name") != old["name"]:
+            project_icons.remove_picture(self.store.path.parent, old["name"])
 
     def _remember_composer_position(self, position: str) -> None:
         self.prefs.composer_position = position
@@ -911,7 +1152,8 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         self.prefs.save()
         self._toast(tr('ui.d5c27b678f48') if self.prefs.external_terminal else tr('ui.e36caf8303b0'))
 
-    def open_terminal(self, preset_id: str, kind: str = "agent", account_id: str = "", environment_id: str = "", terminal_profile: str = "") -> None:
+    def open_terminal(self, preset_id: str, kind: str = "agent", account_id: str = "", environment_id: str = "", terminal_profile: str = "",
+                      resume: bool = False) -> None:
         """Open a project in the workspace: its agent (Codex/Claude) or just an SSH shell, optionally on another account/host."""
         if not self._by_id("presets", preset_id):
             self._notice(tr('ui.ac9411e42933'))
@@ -928,6 +1170,8 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
                 if not account_id:
                     return
             kwargs["account_id"] = account_id
+            if resume:
+                kwargs["resume"] = True      # restoring: continue the last conversation in this folder
         if environment_id:
             kwargs["environment_id"] = environment_id
         self._invoke("launch", **kwargs)
@@ -980,50 +1224,164 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
 
     def save_workspace(self) -> None:
         slots = self.workspace.slots()
-        if not slots:
-            self._notice(tr('ui.304a4ebb9dde'))
-            return
-        dialog = RecordDialog(tr('ui.b26ff42b85a4'), [("name", tr('ui.0d9c97256020'), tr('ui.332d60c4d9e3'))], {"name": ""}, None, self)
+        current = self._by_id("workspaces", self.workspace.workspace_id)
+        dialog = RecordDialog(tr('ui.b26ff42b85a4'), [("name", tr('ui.0d9c97256020'), tr('ui.332d60c4d9e3'))], {"name": current.get("name", "")}, None, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        name = dialog.values()["name"]
+        name = dialog.values()["name"].strip()
         if not name:
             self._notice(tr('ui.067e3e6ad298'))
             return
         existing = next((w for w in self._records.get("workspaces", []) if w.get("name") == name), None)
-        record = {"id": (existing or {}).get("id") or self._new_id().replace("-", ""), "name": name,
+        if existing and existing["id"] != self.workspace.workspace_id:
+            self._notice(tr("A workspace with this name already exists. Choose another name."))
+            return
+        record = {"id": current.get("id") or self._new_id().replace("-", ""), "name": name,
                   "layout": self.workspace.area.mode, "slots": slots}
-        self._save("workspaces", record)
+        if not self._save("workspaces", record):
+            return
+        if self.workspace.workspace_id != record["id"]:
+            old_id = self.workspace.workspace_id
+            self.workspace.name_workspace(record["id"])
+            if old_id in self._pending_slots:           # last time's terminals not brought back yet move along
+                self._pending_slots[record["id"]] = self._pending_slots.pop(old_id)
+                self.workspace.set_pending(old_id, 0)
+                self.workspace.set_pending(record["id"], len(self._pending_slots[record["id"]]))
+        self._incomplete_workspaces.discard(record["id"])
+        self._remember_workspaces()
         self._toast(tr('ui.8c85fc561431', v0=f"{(tr('ui.3055a035f0eb') if existing else tr('ui.dba44ed3f54f'))}", v1=f'{name}', v2=f'{len(slots)}'))
+
+    def new_workspace(self) -> str:
+        """Create an empty workspace and switch to it; returns its id ("" when cancelled)."""
+        dialog = RecordDialog(tr("New workspace"), [("name", tr('ui.0d9c97256020'), tr('ui.332d60c4d9e3'))], {"name": ""}, None, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return ""
+        name = dialog.values()["name"].strip()
+        if not name:
+            self._notice(tr('ui.067e3e6ad298'))
+            return ""
+        if any(w.get("name") == name for w in self._records.get("workspaces", [])):
+            self._notice(tr("A workspace with this name already exists. Choose another name."))
+            return ""
+        record = {"id": self._new_id().replace("-", ""), "name": name, "layout": "tabs", "slots": []}
+        if not self._save("workspaces", record):
+            return ""
+        self.open_workspace(record["id"])
+        return record["id"]
+
+    def edit_workspace(self, workspace_id: str) -> None:
+        """Rename a workspace and choose its icon. The default desktop keeps both in the view preferences."""
+        from .project_icon_dialog import ProjectIconDialog
+        record = self._by_id("workspaces", workspace_id) if workspace_id else {}
+        if workspace_id and not record:
+            return                                  # a desktop whose record was deleted: save it first
+        page = self.workspace
+        key = page.icon_key(workspace_id)
+        old = self.prefs.workspace_icons.get(key)
+        taken = {page.workspace_name(other) for other in page.desktop_ids() if other != workspace_id}
+        taken |= {_value(w, "name") for w in self._records.get("workspaces", []) if w.get("id") != workspace_id}
+        dialog = ProjectIconDialog(self, page.workspace_name(workspace_id), old, title=tr("Workspace name and icon"),
+                                   hue=section_hue("workspace"), glyph=WORKSPACE_GLYPH, name_label=tr('ui.0d9c97256020'), taken=taken)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        name = dialog.result_name()
+        try:
+            entry = dialog.result_entry(self.store.path.parent)
+        except (OSError, ValueError) as exc:
+            self._error(tr("Workspace name and icon"), exc)
+            return
+        if record and name != record.get("name") and not self._save("workspaces", {**record, "name": name}):
+            return
+        if not record:
+            self.prefs.default_workspace_name = "" if name == tr("Default workspace") else name
+        self._apply_icon_choice(self.prefs.workspace_icons, key, old, entry)
+        self.prefs.save()
+        self._render_workspace()
+        self._render_projects()
+        self._render_home()
+
+    def _save_current_workspace(self) -> bool:
+        self._remember_workspaces()             # every desktop is kept up to date as terminals open and close
+        return True
 
     def open_workspace(self, workspace_id: str) -> None:
         workspace = self._by_id("workspaces", workspace_id)
-        if not workspace:
+        if not workspace and workspace_id and not self.workspace.has_workspace(workspace_id):
             return
+        if workspace_id == self.workspace.workspace_id:
+            self.show_page("workspace")
+            return
+        if workspace.get("slots") and not self.workspace.has_workspace(workspace_id) and not self._embedded_enabled():
+            self._notice(tr("Enable built-in terminals before opening a saved workspace."))
+            self.workspace._refresh_workspace_picker()
+            return
+        if not self._save_current_workspace():
+            self.workspace._refresh_workspace_picker()
+            return
+        loaded = self.workspace.has_workspace(workspace_id)
+        self.workspace.switch_workspace(workspace_id, workspace.get("layout", "tabs"))
+        self.show_page("workspace")
+        self._render_home()                     # the current desktop is marked on Home
+        if loaded or not workspace:
+            return
+        self._restore_slots(workspace_id, workspace.get("slots", []))
+
+    def _restore_slots(self, workspace_id: str, slots: list[dict]) -> None:
+        """Bring a desktop's saved terminals back: re-attach work still running on a server, start the rest again
+        (Codex / Claude continue their last conversation)."""
         opened = skipped = 0
-        for slot in workspace.get("slots", []):
+        failed: list[dict] = []
+        used_sessions = self._open_session_ids()
+        for slot in slots:
             project = self._by_id("presets", slot.get("preset_id", ""))
+            kind = slot.get("kind", "agent")
+            if project and any(tab.info.preset_id == project["id"] and ("shell" if tab.info.tool == "shell" else "agent") == kind
+                               and (kind == "shell" or not slot.get("account_id") or tab.info.account_id == slot["account_id"])
+                               for tab in self.workspace.desktop_tabs(workspace_id)):
+                continue                    # already open here (opened by hand before restoring): no second copy
+            count = len(self.workspace.desktop_tabs(workspace_id))
             if project:
                 account_id = slot.get("account_id", "")
                 if slot.get("environment_id") and slot.get("environment_id") != project.get("environment_id"):
                     account_id = ""         # saved before projects were tied to one host: open on the project's own, and pick again
-                self.open_terminal(slot["preset_id"], slot.get("kind", "agent"), account_id, "", slot.get("terminal_profile", ""))
-                opened += 1
+                # Reuse a recoverable run after a launcher restart instead of creating another remote job.
+                candidates = self._restore_steps(project["id"])
+                step = next((step for step in candidates if step.session["id"] not in used_sessions
+                             and step.session.get("mode", "agent") == slot.get("kind", "agent")
+                             and step.session.get("environment_id") == project.get("environment_id")
+                             and (slot.get("kind") == "shell" or step.session.get("account_id") == account_id)
+                             and step.session.get("terminal_profile", "") == slot.get("terminal_profile", "")), None)
+                if step:
+                    used_sessions.add(step.session["id"])
+                    self._attach_step(step) if step.action == "attach" else self._relaunch(step.session)
+                else:
+                    self.open_terminal(slot["preset_id"], kind, account_id, "", slot.get("terminal_profile", ""), resume=True)
+                if len(self.workspace.desktop_tabs(workspace_id)) > count:
+                    opened += 1
+                else:
+                    failed.append(slot)
             else:
-                skipped += 1
-        self.workspace.set_layout(workspace.get("layout", "tabs"))
-        self.show_page("workspace")
+                skipped += 1                # its project was deleted: dropped from the desktop, not a failure
         if skipped:
             self._toast(tr('ui.8d9308ae0c16', v0=f'{opened}', v1=f'{skipped}'), "warn")
+        if failed:
+            # Kept waiting (and saved) instead of freezing the whole desktop: Restore tries them again.
+            self._pending_slots[workspace_id] = self._pending_slots.get(workspace_id, []) + failed
+            self.workspace.set_pending(workspace_id, len(self._pending_slots[workspace_id]))
+            self._toast(tr("Some terminals could not be restored. Press Restore to try them again."), "warn")
+        if failed or skipped:
+            self._remember_workspaces()         # no terminal changed, so record the cleaned-up arrangement now
 
     def delete_workspace(self, workspace_id: str) -> None:
         workspace = self._by_id("workspaces", workspace_id)
         if workspace and self._confirm(tr('ui.60f6d6ddd4c7'), tr('ui.be9189d66047', v0=f"{_value(workspace, 'name')}"),
                                        confirm_text=tr('ui.3c8f5b363ab3'), danger=True):
-            self._delete("workspaces", workspace_id)
+            if self._delete("workspaces", workspace_id):
+                self._incomplete_workspaces.discard(workspace_id)
 
     def _render_workspace(self) -> None:
         if hasattr(self, "workspace"):
+            self.workspace.set_identity(self.prefs.default_workspace_name, self.prefs.workspace_icons)
             self.workspace.set_data(self._records.get("presets", []), self._records.get("accounts", []),
                                     self._records.get("environments", []), self._records.get("workspaces", []))
             self.workspace.update_sessions(self._records.get("sessions", []))
@@ -1076,17 +1434,41 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         self.env_page.set_layout_mode("drawer" if narrow else "split")
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        running = self.workspace.running_count() if hasattr(self, "workspace") else 0
-        if running and not self._confirm(
-                tr('ui.8e865844985b'),
-                tr('ui.298721c8b2ff', v0=f'{running}'), confirm_text=tr('ui.c76448f6bfff'), danger=True):
+        alive = [tab for tab in self.workspace.tabs() if tab.alive()] if hasattr(self, "workspace") else []
+        kept = sum(1 for tab in alive if tab.info.tmux)          # survives on its server
+        ending = len(alive) - kept                                # local, or SSH without tmux: ends with the terminal
+        if kept and ending:
+            message = tr('ui.298721c8b2ff', v0=f'{len(alive)}')
+        elif ending:
+            message = tr("{count} terminal(s) are still running. Closing Vibe Launcher ends the work in them.", count=ending)
+        else:
+            message = tr("{count} terminal(s) are connected. Their work keeps running on the server in tmux and can be reconnected from Sessions.",
+                         count=kept)
+        if alive and not self._confirm(tr('ui.8e865844985b'), message, confirm_text=tr('ui.c76448f6bfff'), danger=True):
             event.ignore()
             return
         if hasattr(self, "workspace"):
+            if not self._save_current_workspace():
+                event.ignore()
+                return
+            local_ids = [tab.info.session_id for tab in alive if tab.info.local and tab.info.session_id]
+            self._closing = True                # what is saved now is what reopens next time
             self.workspace.shutdown()
+            self._end_local_sessions(local_ids)
         self.tunnels.shutdown()
         terminal_module.release_warm_page()
         super().closeEvent(event)
+
+    def _end_local_sessions(self, session_ids: list[str]) -> None:
+        """The terminals just closed took their local work with them: record that instead of leaving "running" behind."""
+        for session_id in session_ids:
+            try:
+                session = self.store.get("sessions", session_id)
+                if session.get("status") not in {"ended", "failed"}:
+                    self.store.save("sessions", {**session, "status": "ended", "updated_at": runtime_module.now()})
+                runner_module.end_local_record(self.store.path.parent, session_id)
+            except Exception:
+                continue                      # closing the window must never fail on bookkeeping
 
     def toggle_sidebar(self) -> None:
         if self.width() >= 1000:
@@ -1163,9 +1545,20 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
                  ("environments", tr('ui.fba18681418f'), "layers"), ("sessions", tr('ui.eda135194fbc'), "activity"))
         for index, (key, label, icon) in enumerate(pages, start=1):
             commands.append(Command(f"go-{key}", tr('ui.71d0223d2073', v0=f'{label}'), keys[f"page:{index}"], icon, tr('ui.fa96079c3b2f'), lambda k=key: self.show_page(k)))
-        for number, tab in enumerate(self.workspace.tabs(), start=1):
+        for workspace_id in self.workspace.desktop_ids():
+            entry = self.workspace.icon_entry(workspace_id)
+            glyph = entry["name"] if entry and entry["kind"] == "glyph" else WORKSPACE_GLYPH
+            commands.append(Command(f"workspace-{workspace_id or 'default'}",
+                                    tr("Switch workspace: {name}", name=self.workspace.workspace_name(workspace_id)),
+                                    "", glyph, tr('ui.1c5ab76e581d'), lambda i=workspace_id: self.open_workspace(i)))
+        commands.append(Command("workspace-new", tr("New workspace"), "", "plus", tr('ui.1c5ab76e581d'), self.new_workspace))
+        commands.append(Command("workspace-edit", tr("Edit the current workspace's name and icon…"), "", "pencil",
+                                tr('ui.1c5ab76e581d'), lambda: self.edit_workspace(self.workspace.workspace_id)))
+        current_ids = [tab.info.id for tab in self.workspace.current_tabs()]
+        for tab in self.workspace.tabs():
+            number = current_ids.index(tab.info.id) + 1 if tab.info.id in current_ids else 0
             commands.append(Command(f"term-{tab.info.id}", tr('ui.f7f9c06d7c53', v0=f"{tab.info.project or tr('ui.fd201455c92e')}", v1=f'{tab.info.label}'),
-                                    f"{tab.info.environment}  {keys[f'goto:{number}']}" if number < 10 else tab.info.environment,
+                                    f"{tab.info.environment}  {keys[f'goto:{number}']}" if 0 < number < 10 else tab.info.environment,
                                     "square-terminal" if tab.info.tool == "shell" else TOOL_ICONS.get(tab.info.tool, "terminal"), tr('ui.fd201455c92e'),
                                     lambda i=tab.info.id: (self.show_page("workspace"), self.workspace.select(i)), "switch terminal"))
         for project in sorted(self._records.get("presets", []), key=lambda p: _value(p, "name").casefold()):
@@ -1211,11 +1604,12 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         try:
             self._records = {kind: self.store.list(kind) for kind in ("accounts", "environments", "presets", "sessions", "auth_states", "workspaces", "github_accounts", "web_services")}
             self._prune_project_icons()
+            self._prune_workspace_icons()
+            self._render_workspace()                # first: the Projects page reads the desktops from it
             self._render_projects()
             self._render_records("accounts")
             self._render_environments()
             self._render_sessions()
-            self._render_workspace()
             self._refresh_quota_panel()
             self._render_home()
         except Exception as exc:
@@ -1260,25 +1654,37 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
                 self._last_poll_error = time.monotonic()
                 self._diagnose("poll", exc)
 
-    def _reap_closed_terminals(self) -> None:
+    QUEUED_GRACE_SECONDS = 120     # a queued session's runner records itself within moments of starting
+
+    def _reap_closed_terminals(self) -> bool:
         """A terminal window that was closed takes its runner with it, so the status it last wrote can never advance.
         Move such sessions to "unknown" (they may still run remotely): the user can then refresh to find out."""
         changed = False
+        now = datetime.now(timezone.utc)
         for session in self._records.get("sessions", []):
             pid = session.get("runner_pid")
             status = session.get("status")
+            updated = _value(session, "updated_at")
+            queued = status == "queued"
+            if queued:
+                written = env_state.parse_time(updated)
+                if written is not None and (now - written).total_seconds() < self.QUEUED_GRACE_SECONDS:
+                    continue                        # its runner may not have recorded itself yet
             local = self._by_id("environments", _value(session, "environment_id")).get("kind") == "local"
-            if local and status in {"connecting", "waiting_auth", "running", "detached", "unknown"}:
+            if local and status in {"queued", "connecting", "waiting_auth", "running", "detached", "unknown"}:
                 # Nothing keeps a local session alive once its terminal is gone, so there is nothing "unknown" about it.
-                if not pid or not runner_module.process_alive(pid):
+                if not pid or not runner_module.runner_alive(pid, updated, local=True, queued=queued):
                     self.store.save("sessions", {**session, "status": "ended", "updated_at": runtime_module.now()})
+                    runner_module.end_local_record(self.store.path.parent, session["id"])
                     changed = True
                 continue
-            if pid and status in {"connecting", "waiting_auth"} and not runner_module.process_alive(pid):
+            if ((pid and status in {"connecting", "waiting_auth"}) or queued) and not (
+                    pid and runner_module.runner_alive(pid, updated, local=False, queued=queued)):
                 self.store.save("sessions", {**session, "status": "unknown", "updated_at": runtime_module.now()})
                 changed = True
         if changed:
             self._records["sessions"] = self.store.list("sessions")
+        return changed
 
     def _fill_list(self, listing: QListWidget, rows: list[tuple[str, Any, str]]) -> None:
         """Replace list rows only when they changed, keeping selection and scroll position."""
@@ -1338,6 +1744,12 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         if self._project_env_filter:
             projects = [p for p in projects if p.get("environment_id") == self._project_env_filter]
         projects = [p for p in projects if term in (_value(p, "name") + " " + _value(p, "path")).casefold()]
+        members = self._workspace_membership() if hasattr(self, "workspace") else {}
+        chosen = self._refresh_workspace_filter()
+        if chosen == NO_WORKSPACE:
+            projects = [p for p in projects if not members.get(p.get("id", ""))]
+        elif chosen != ALL_WORKSPACES:
+            projects = [p for p in projects if chosen in members.get(p.get("id", ""), [])]
         if self.sort.currentData() == "name":
             projects.sort(key=lambda p: _value(p, "name").casefold())
         else:
@@ -1346,11 +1758,17 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         self.project_chip_row.setVisible(bool(self._project_env_filter))
         self.project_env_chip.setText(tr('ui.e72e91ee2841', v0=f"{_value(env, 'name', tr('ui.4d8c1c5b4283'))}"))
         rows = []
+        effective = self._effective_sessions()
+        restorable = self._restorable_projects()
         for project in projects:
             favorite = bool(project.get("favorite"))
             tags = " ".join("#" + t for t in project_tags(project))
-            label = ("★ " if favorite else "☆ ") + (_value(project, "name") or tr('ui.9009ac5a2f2b')) + "\n" + (tags + "  ·  " if tags else "") + _value(project, "path")
-            rows.append((label, project.get("id"), _value(project, "path"), env_state.project_badge(project.get("id"), self._records.get("sessions", [])),
+            names = [self.workspace.workspace_name(w) for w in members.get(project.get("id", ""), [])]
+            where = tr("Workspaces: {names}", names=join_names(names)) if names else ""
+            label = ("★ " if favorite else "☆ ") + (_value(project, "name") or tr('ui.9009ac5a2f2b')) + "\n" + "  ·  ".join(
+                filter(None, (tags, where, _value(project, "path"))))
+            tip = _value(project, "path") + ("\n" + where if where else "")
+            rows.append((label, project.get("id"), tip, self._project_badge(project.get("id", ""), effective, restorable),
                          project_icons.signature(project.get("id", ""))))
         self._fill_list(self.project_list, rows)
         if not self.project_list.currentItem() and self.project_list.count():
@@ -1368,6 +1786,7 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
             self._selected_project = None
             self.project_tile.set_icon("folder", section_hue("projects"))
             self.work_drawer.hide()
+            self.project_workspaces_host.hide()
             self.project_title.setText(tr('ui.c5558838fe05') if not has_any else tr('ui.efff54056571'))
             self.project_info.setText(tr('ui.8b8558fc54b0') if not has_any
                                       else tr('ui.3ab1e0fbb2db'))
@@ -1383,10 +1802,95 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         self.favorite_filter.setChecked(False)
         self.favorite_filter.blockSignals(False)
         self._project_env_filter = None
+        self.project_workspace_filter.blockSignals(True)
+        self.project_workspace_filter.setCurrentIndex(0)
+        self.project_workspace_filter.blockSignals(False)
         self.tag_bar.set_selected([])
         self.prefs.project_tags = []
         self.prefs.save()
         self._render_projects()
+
+    def _refresh_workspace_filter(self) -> str:
+        """Offer every desktop in the Projects filter, keeping the chosen one while it exists; returns the choice."""
+        box = self.project_workspace_filter
+        chosen = box.currentData()
+        if not hasattr(self, "workspace"):
+            return ALL_WORKSPACES
+        page = self.workspace
+        choices = [(page.workspace_name(w), w, repr(page.icon_entry(w))) for w in page.desktop_ids()]
+        if choices != getattr(box, "_choices", None):
+            box.blockSignals(True)
+            box.clear()
+            box.addItem(tr("All workspaces"), ALL_WORKSPACES)
+            for name, workspace_id, _ in choices:
+                box.addItem(page.workspace_icon(workspace_id), name, workspace_id)
+            box.addItem(tr("Not in any workspace"), NO_WORKSPACE)
+            index = box.findData(chosen) if chosen is not None else -1
+            box.setCurrentIndex(index if index >= 0 else 0)
+            box.blockSignals(False)
+            box._choices = choices
+        return box.currentData()
+
+    def _show_project_workspaces(self, preset_id: str) -> None:
+        """Chips of the desktops this project is in (a click switches there), or a note that it is in none."""
+        ids = self._workspace_membership().get(preset_id, []) if hasattr(self, "workspace") else []
+        signature = [(w, self.workspace.workspace_name(w), repr(self.workspace.icon_entry(w))) for w in ids]
+        if signature == getattr(self, "_project_workspaces_shown", None):
+            return
+        self._project_workspaces_shown = signature
+        while self.project_workspaces.count():
+            item = self.project_workspaces.takeAt(0)
+            if item is not None and item.widget() is not None:
+                dispose_widget(item.widget())
+        if not ids:
+            self.project_workspaces.addWidget(text_label(tr("Not in any workspace"), "meta"))
+            return
+        self.project_workspaces.addWidget(text_label(tr("Workspaces"), "meta"))
+        for workspace_id, name, _ in signature:
+            chip = make_button(name, "subtle", small=True, tip=tr("Switch to this workspace"))
+            chip.setIcon(self.workspace.workspace_icon(workspace_id))
+            chip.setIconSize(QSize(18, 18))
+            chip.setProperty("workspaceChip", workspace_id)
+            chip.clicked.connect(lambda *_, w=workspace_id: self.open_workspace(w))
+            self.project_workspaces.addWidget(chip)
+
+    def _open_in_workspace_actions(self) -> list[MenuAction]:
+        page = self.workspace
+        actions = []
+        for workspace_id in page.desktop_ids():
+            entry = page.icon_entry(workspace_id)
+            glyph = entry["name"] if entry and entry["kind"] == "glyph" else WORKSPACE_GLYPH
+            name = page.workspace_name(workspace_id)
+            text = tr("{name} (current)", name=name) if workspace_id == page.workspace_id else name
+            actions.append(MenuAction(text, lambda w=workspace_id: self.open_project_in_workspace(w), glyph))
+        actions.append(MenuAction(tr("New workspace…"), lambda: self.open_project_in_workspace(None), "plus", separator_before=True))
+        return actions
+
+    def open_project_in_workspace(self, workspace_id: str | None) -> None:
+        """Open the selected project on a chosen desktop (None: a new one). A terminal for it that the switch just
+        restored there is reused instead of opening a second one."""
+        preset_id = self._selected_project
+        if not preset_id:
+            return
+        if not self._embedded_enabled():
+            self._notice(tr("Workspaces hold built-in terminals. Turn off separate terminal windows to use them."))
+            return
+        page = self.workspace
+        if workspace_id is None:
+            workspace_id = self.new_workspace()
+            if not workspace_id:
+                return
+        elif workspace_id != page.workspace_id:
+            self.open_workspace(workspace_id)
+        if page.workspace_id != workspace_id:
+            return                                  # the switch was refused (or its save failed): nothing opens elsewhere
+        existing = next((tab for tab in page.desktop_tabs(workspace_id) if tab.info.preset_id == preset_id and tab.alive()
+                         and tab.info.kind in {"agent", "attach"}), None)
+        if existing is not None:
+            self.show_page("workspace")
+            page.select(existing.info.id)
+            return
+        self.open_terminal(preset_id)
 
     def _project_selected(self, current: QListWidgetItem | None, _: QListWidgetItem | None = None) -> None:
         if not current:
@@ -1400,9 +1904,12 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         self.project_title.setText(("★ " if project.get("favorite") else "☆ ") + _value(project, "name", tr('ui.9009ac5a2f2b')))
         self.project_tile.set_project(self._selected_project)
         self.favorite_button.setText(tr('ui.dca60869e7d2') if project.get("favorite") else tr('ui.60a53514eb92'))
+        self.project_workspaces_host.show()
+        self._show_project_workspaces(_value(project, "id"))
+        self.open_in_workspace_button.setVisible(self._embedded_enabled())
         self.work_drawer.show()
         self.work_drawer.set_works(self._work_rows(_value(project, "id")), len(self._restore_steps(_value(project, "id"))))
-        status = env_state.project_status(_value(project, "id"), self._records.get("sessions", []))
+        status = env_state.project_status(_value(project, "id"), self._effective_sessions())
         if environment.get("kind") == "local":
             run_mode = tr('ui.a40bef948264')
         elif project.get("persistent", True) is False:
@@ -1429,21 +1936,29 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
 
     # -- project workspaces (the drawer) ----------------------------------------------------------------
     def _work_rows(self, preset_id: str) -> list[WorkRow]:
-        open_tabs = {tab.info.session_id: tab.info.id for tab in self.workspace.tabs() if tab.info.session_id and tab.alive()} \
+        open_tabs = {tab.info.session_id: tab for tab in self.workspace.tabs() if tab.info.session_id and tab.alive()} \
             if hasattr(self, "workspace") else {}
         rows = []
+        shown = {s["id"]: s.get("status", "unknown") for s in self._effective_sessions()}
         for session in env_state.project_sessions(preset_id, self._records.get("sessions", [])):
             account = self._by_id("accounts", _value(session, "account_id"))
             environment = self._by_id("environments", _value(session, "environment_id"))
             shell = _value(session, "mode") == "shell"
             title = tr('ui.9f7cfab95388') if shell else (TOOL_NAMES.get(account.get("tool"), tr('ui.fd201455c92e')) + (f" · {_value(account, 'name')}" if account else ""))
             attach, stop, remove, _ = self.session_actions(session)
+            tab = open_tabs.get(session["id"])
             rows.append(WorkRow(session_id=session["id"], title=title,
                                 sub=tr('ui.7f3221545a9b', v0=f"{_value(environment, 'name', tr('ui.13c355a95d42'))}", v1=f"{_display_time(_value(session, 'updated_at'))}"),
-                                badge=env_state.session_badge(_value(session, "status", "unknown")),
-                                tab_id=open_tabs.get(session["id"], ""), can_attach=attach, can_stop=stop, can_remove=remove,
+                                badge=env_state.session_badge(shown.get(session["id"], _value(session, "status", "unknown"))),
+                                tab_id=tab.info.id if tab else "", can_attach=attach, can_stop=stop, can_remove=remove,
                                 can_restart=env_state.can_restart(session, self._records.get("environments", []), self._records.get("accounts", []),
-                                                      _value(self._by_id("presets", preset_id), "environment_id"))))
+                                                      _value(self._by_id("presets", preset_id), "environment_id")),
+                                workspace=self.workspace.workspace_name(tab.info.workspace_id) if tab else ""))
+        if hasattr(self, "workspace"):              # open ones by desktop (picker order), newest first inside each
+            desktops = {workspace_id: index for index, workspace_id in enumerate(self.workspace.desktop_ids())}
+            place = {row.session_id: desktops.get(open_tabs[row.session_id].info.workspace_id, len(desktops))
+                     for row in rows if row.tab_id}
+            rows.sort(key=lambda row: place.get(row.session_id, len(desktops) + 1))
         return rows
 
     def _open_session_ids(self) -> set[str]:
@@ -1466,6 +1981,8 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         project = self._by_id("presets", preset_id)
         if not project:
             return
+        if hasattr(self, "workspace") and self._restore_in_workspace(preset_id):
+            return
         steps = self._restore_steps(preset_id)
         if not steps:
             has_any = any(s.get("preset_id") == preset_id for s in self._records.get("sessions", []))
@@ -1481,6 +1998,34 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
             done += bool(self._attach_step(step) if step.action == "attach" else self._relaunch(step.session))
         if done < len(steps):
             self._toast(tr('ui.8b4eb8291994', v0=f'{done}', v1=f'{len(steps)}'), "warn")
+
+    def _restore_in_workspace(self, preset_id: str) -> bool:
+        """Restoring a project means returning to the workspace it was in, as it was: show its open terminal, or bring
+        that desktop's saved terminals back (re-attach tmux, continue the conversations). False: in no workspace."""
+        page = self.workspace
+        members = self._workspace_membership().get(preset_id, [])
+        for workspace_id in members:
+            tab = next((t for t in page.desktop_tabs(workspace_id) if t.info.preset_id == preset_id and t.alive()), None)
+            if tab is not None:
+                self.show_page("workspace")
+                page.select(tab.info.id)
+                return True
+        for workspace_id in members:
+            if self._pending_slots.get(workspace_id):
+                self.restore_pending(workspace_id)
+                return True
+            ended = next((t for t in page.desktop_tabs(workspace_id) if t.info.preset_id == preset_id), None)
+            if ended is not None:                       # still on that desktop, finished: start it again in its place
+                if workspace_id != page.workspace_id:
+                    self.open_workspace(workspace_id)
+                if page.workspace_id == workspace_id:
+                    self.show_page("workspace")
+                    self.reload_terminal(ended.info.id)
+                return True
+            if workspace_id and not page.has_workspace(workspace_id):
+                self.open_workspace(workspace_id)       # its saved terminals come back with it
+                return True
+        return False
 
     def _attach_step(self, step: env_state.RestoreStep) -> bool:
         return self._invoke("attach", session_id=step.session["id"])
@@ -1506,6 +2051,7 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
                 self._notice(tr('ui.cecc661dd7e6'))
                 return False
             kwargs["account_id"] = account["id"]
+            kwargs["resume"] = True           # bring the conversation back, not just the program
         if not self._invoke("launch", **kwargs):
             return False
         try:
@@ -1585,6 +2131,9 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         page.restore_requested.connect(self.restore_project)
         page.add_project_requested.connect(self.add_project)
         page.updates_requested.connect(lambda: self.open_settings("about"))
+        page.workspace_requested.connect(self.open_workspace)
+        page.new_workspace_requested.connect(self.new_workspace)
+        page.edit_workspace_requested.connect(self.edit_workspace)
         self.home_page = page
         return page
 
@@ -1594,7 +2143,10 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         root = self.store.path.parent
         states = [env_state.build_env_state(env, records=self._records, root=root, pinned=env.get("id") in self.prefs.pinned)
                   for env in self._records.get("environments", [])]
-        self.home_page.set_data(self._records, states, self.update_report())
+        self.home_page.set_data({**self._records, "sessions": self._effective_sessions()}, states, self.update_report(),
+                                restorable=self._restorable_projects())
+        if hasattr(self, "workspace"):
+            self.home_page.set_workspaces(self._workspace_cards())
 
     def _remember_toast_anchor(self, anchor) -> None:
         if hasattr(self.prefs, "toast_anchor"):
@@ -1651,9 +2203,8 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
                            latest=report.get("latest", "")), "info")
 
     def apply_update(self) -> None:
-        """Back up settings, warn about settings a new version removes or changes, then update in a terminal."""
+        """Back up settings, then update in a terminal."""
         from . import updates
-        from .about import change_text, settings_changes
         repo = updates.repo_root()
         report = self.update_report() or {}
         packaged = selfcmd.frozen()
@@ -1665,13 +2216,9 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
             if not clean:
                 self._notice(tr("The program folder has local changes, so updating is paused to keep them safe.") + "\n" + reason)
                 return
-        changes = settings_changes(report)
-        message = (tr("Your settings are backed up first; existing values are not changed. The launcher will close and start again by itself; local terminals that are still running end (SSH work kept in tmux keeps running).")
+        message = (tr("Your data is backed up first. The launcher will close and start again by itself; local terminals that are still running end (SSH work kept in tmux keeps running).")
                    if packaged else
-                   tr("Your settings are backed up first; existing values are not changed. Restart the launcher afterwards."))
-        if changes:
-            message += "\n\n" + tr("These versions change settings:") + "\n" + "\n".join(
-                f"v{version}  {change_text(change)}" for version, change in changes)
+                   tr("Your data is backed up first. Restart the launcher afterwards."))
         if not self._confirm(tr("Update Vibe Launcher"), message, confirm_text=tr("Update")):
             return
         data = str(self.store.path.parent)
@@ -1835,12 +2382,7 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         except (OSError, ValueError) as exc:
             self._error(tr("Project icon"), exc)
             return
-        if entry is None:
-            self.prefs.project_icons.pop(project["id"], None)
-        else:
-            self.prefs.project_icons[project["id"]] = entry
-        if old and old["kind"] == "file" and old != entry and (entry or {}).get("name") != old["name"]:
-            project_icons.remove_picture(root, old["name"])
+        self._apply_icon_choice(self.prefs.project_icons, project["id"], old, entry)
         self.prefs.save()
         self._refresh_project_icons()
 
@@ -1862,6 +2404,17 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         if gone:
             self.prefs.save()
             project_icons.configure(self.store.path.parent, self.prefs.project_icons)
+
+    def _prune_workspace_icons(self) -> None:
+        """Forget icons (and their copied pictures) of workspaces that were deleted."""
+        known = {w.get("id") for w in self._records.get("workspaces", [])} | {DEFAULT_ICON_KEY}
+        gone = [key for key in self.prefs.workspace_icons if key not in known]
+        for key in gone:
+            entry = self.prefs.workspace_icons.pop(key)
+            if entry["kind"] == "file":
+                project_icons.remove_picture(self.store.path.parent, entry["name"])
+        if gone:
+            self.prefs.save()
 
     def delete_project(self) -> None:
         if not self._selected_project:
@@ -2011,7 +2564,7 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
             if values.get("auth") != "subscription" or self._by_id("environments", values.get("environment_id", "")).get("kind") != "ssh":
                 self._notice(tr('ui.af869b01737d'))
                 return
-            values.update(model="", base_url="", share_extensions=False, import_history=False, share_project_history=False)
+            values.update(model="", base_url="", share_project_history=False)
         if kind == "accounts" and values.get("auth") == "api":
             values["environment_id"] = ""        # a key / endpoint is not tied to a machine
         if kind == "environments" and values["kind"] == "local":
@@ -2282,7 +2835,7 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
             self._toast(tr('ui.40857ec8a467') if result["status"] == "configured" else tr('ui.72233aaf51c6'))
 
     def refresh_project_history(self, preset_id: str, account_id: str, environment_id: str) -> None:
-        """Copy the project's conversations from the other accounts into this account's profile, so `/resume` sees them."""
+        """Refresh this project's conversations from the native user home and other launcher profiles."""
         def done(result: dict) -> None:
             summary = result.get("summary") or {}
             if result.get("status") != "imported":
@@ -2290,7 +2843,7 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
             elif summary.get("copied"):
                 self._toast(tr("Added {v0} conversation(s); use /resume in the terminal to pick them up", v0=str(summary["copied"])))
             else:
-                self._toast(tr("No new conversations from your other accounts"))
+                self._toast(tr("No new conversations in this environment"))
         self._start_operation("import-history", {"preset_id": preset_id, "account_id": account_id, "environment_id": environment_id,
                                                   "operation": {"project_history": True}}, done)
 
@@ -2308,6 +2861,12 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
     # ------------------------------------------------------------------ service plumbing
     # -- account quota ---------------------------------------------------------------------------
     def _invoke(self, action: str, **kwargs: Any) -> bool:
+        if action == "attach":
+            tab = next((tab for tab in self.workspace.tabs() if tab.alive() and not tab.closing
+                        and tab.info.session_id == kwargs.get("session_id")), None)
+            if tab:
+                self._work_switch(tab.info.id)
+                return self.workspace.selected_id() == tab.info.id
         embedded = action in self.EMBEDDED_ACTIONS and self._embedded_enabled()
         try:
             if embedded:

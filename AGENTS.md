@@ -9,7 +9,8 @@ README also has `README.zh-TW.md` and `README.zh-CN.md`.
 - Sign in once per account; every account has its own profile and never touches the user's `~/.codex` / `~/.claude`.
 - Projects are not bound to accounts. Subscription sign-ins live in their environment; API accounts work anywhere.
 - SSH work runs in tmux: it survives closing the terminal and can be re-attached, stopped or recalled.
-- A project can have many workspaces (sessions); the project drawer and the Workspace page both show and recover them.
+- A workspace is a named desktop containing terminals from multiple projects; switching desktops keeps their processes and layouts.
+- A project can have many sessions; the project drawer and the Workspace page both show and recover them.
 
 ## Method (`src/vibe_launcher/`)
 - UI: `ui.py` main window (+ mixins `ui_sessions.py`, `ui_integrations.py`), `workspace_page.py` terminals and quick
@@ -20,7 +21,8 @@ README also has `README.zh-TW.md` and `README.zh-CN.md`.
 - **`runtime.py` is sent whole to SSH hosts as one script**: remote logic lives there, it must not import other package
   modules, and it must run on older Python (guard `tomllib` etc.).
 - Isolation: `CODEX_HOME` / `CLAUDE_CONFIG_DIR` point to `<data>/profiles/<tool>/<account_id>`; environments pass
-  through `isolated_env`; skills/hooks are shared by copying an allow-list, never credentials.
+  through `isolated_env`. Each launch refreshes native user extensions and conversations; project discovery stays native.
+  Claude plugins use current user/project settings; Codex can use the native SQLite state directory. Credentials stay isolated.
 - Self-start and packaging: `selfcmd.py` (the only place that builds helper command lines), `entry.py`, `updates.py`,
   `packaging/`; read *Packaging, updates and licence* before changing them.
 - UI strings go through `i18n.tr()`; run `scripts/check_translations.py --sync`, then fill in `zh-TW.json`.
@@ -54,8 +56,10 @@ QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -m pytest -q --basetemp=<temp
   Launcher data paths go through `assert_private_path` (rejects symlinks, reparse points, hard links).
 - Terminal output is never a status source; remote results come from supervisor exit codes
   (78 not started, 79 ended, 80 background, 81 failed). Unknown remote work is never treated as ended.
-- Data changes are conservative: a SQLite schema change needs a migration verified on a backup copy of a real database;
-  new settings must survive older builds (see `tests/test_settings_compat.py`).
+- Development stage: nothing is kept for older builds. No migrations, legacy fields, old file formats or
+  newer-build preservation; the store drops fields it does not know and `ui-state.json` / `settings.json` fall back to
+  defaults for values they cannot use. Before changing the database schema, check (read-only) that the user's own
+  database still opens, or tell them what would have to be reset; never rewrite their data without asking.
 - Deletions ask first and go through `store.delete`'s release flow (no foreign-key dead ends).
 - Keep readable contrast for secondary text.
 
@@ -107,10 +111,10 @@ six hours, can be switched off), and downloads are streamed to disk in 256 KB pi
   GitHub over https. There is no code signing yet, so Windows SmartScreen may warn; integrity rests on GitHub's TLS and the
   checksum. Never embed tokens; never run an installer whose checksum did not match.
 - Data in `%LOCALAPPDATA%\VibeLauncher` is never written inside the install folder and survives install, update and
-  uninstall. Anything a release removes or changes in `ui-state.json`, `settings.json` or the database goes under
-  `### 設定變更` of its CHANGELOG section: the updater shows it before the user confirms.
+  uninstall; both channels back it up before updating.
 
-**Releasing.** Bump `version`, turn `[Unreleased]` into `## [x.y.z] - date`, merge the PR, tag `vx.y.z` on `main`;
+**Releasing.** On `develop` or `hotfix`: bump `version`, turn `[Unreleased]` into `## [x.y.z] - date`; merge the PR
+into `main`, tag `vx.y.z` on `main`;
 `.github/workflows/release.yml` tests, builds, self-tests and publishes the installer, checksum and notes (full steps in the
 skill). A release without both assets is invisible to the updater. The v0.1.0 program folder build and packaged self-test
 passed locally. Check each GitHub Release for both assets and matching notes. Installer installation and a real in-app
@@ -125,20 +129,34 @@ Linux (planned): a packaged build will need its own `selfcmd` branch (no `.exe` 
   require users to update; minor for optional new features; patch for small changes, usually bug fixes. Reset lower
   numbers to zero when incrementing major or minor. This is the release policy; the launcher currently asks users
   before applying updates and does not enforce mandatory updates. Keep `pyproject.toml`, CHANGELOG and the tag consistent.
-- **Branch first.** Before implementing, run `git status` and `git branch --show-current`. Work belongs on a topic branch
-  named for the task: `feat/…`, `fix/…`, `docs/…`, `refactor/…`. If you are on `main` or on a branch for another task:
-  `git fetch origin`, then branch from the latest `origin/main` (`git switch -c fix/<topic> origin/main`).
-  Uncommitted changes in the tree belong to the user: never discard them; ask whether to carry them to the new branch.
-  Only stay on the current branch when the user explicitly says so.
-- **Finish cleanly.** Before handing over, bring the branch up to date with `origin/main` (rebase or merge), resolve
-  conflicts, and re-run the full tests. Then it goes back to `main` through a PR; `main` changes only by merging PRs
-  after CI (`.github/workflows/ci.yml`, Windows + offscreen Qt) passes.
-- Commit, push, open or merge PRs only when the user asks. One-line commit messages that say what changed;
+- **Branches** (Git Flow without release branches, merged through GitHub PRs):
+
+  | Branch | Role | Branches from | Merges into | On GitHub |
+  | --- | --- | --- | --- | --- |
+  | `main` | Released version; every merge is a release candidate, tagged `vX.Y.Z` | — | — | yes |
+  | `develop` | Test version: finished features are merged and tested here | `main` | `main` (PR) | yes |
+  | `hotfix` | Test version for fixes to the released `main` | `main` | `main` (PR), then `develop` | yes |
+  | `feat/dev_<module>_<function>` | One feature, extension, docs or refactor (e.g. `feat/dev_workspace_restore`) | `develop` | `develop` (local merge) | **never** |
+  | `fix_<module>_<function>[N]` | One fix to the released version (e.g. `fix_runtime_sync1`) | `hotfix` | `hotfix` (local merge) | **never** |
+
+  `<module>` is the source module or area (`workspace`, `runtime`, `store`, `docs` …), `<function>` the feature or
+  function, lower case with underscores. `.githooks/pre-push` refuses to push anything but `main`, `develop`, `hotfix`
+  and `v*` tags; enable it once per clone with `git config core.hooksPath .githooks`.
+- **Branch first.** Before implementing, run `git status` and `git branch --show-current`. A feature starts from the
+  latest `develop` (`git switch develop`, `git pull --ff-only`, `git switch -c feat/dev_<module>_<function>`); a fix to
+  the released version starts from `hotfix` (create it from `origin/main` when it does not exist:
+  `git switch -c hotfix origin/main`). Uncommitted changes in the tree belong to the user: never discard them; ask
+  whether to carry them to the new branch. Only stay on the current branch when the user explicitly says so.
+- **Finish cleanly.** Run the full tests on the work branch, merge it into its parent with `git merge --no-ff`, run the
+  full tests again there, push only `develop` / `hotfix`, and delete the merged work branch (`git branch -d`).
+  `main` changes only by merging a `develop` or `hotfix` PR after CI (`.github/workflows/ci.yml`, Windows + offscreen
+  Qt) passes. After a `hotfix` PR is merged: merge `main` back into `develop`, delete `hotfix` (local and remote) and
+  create it again from `main` when the next fix comes.
+- Commit, merge, push, open or merge PRs only when the user asks. One-line commit messages that say what changed;
   PR descriptions follow the template (verified / not verified).
-- Release: see *Packaging, updates and licence* (bump `version`, turn `[Unreleased]` into `## [x.y.z] - date`, merge,
-  tag `vx.y.z` on `main`; the release workflow builds and publishes, and the launcher updates from that release). Removed or changed settings (`ui-state.json`,
-  `settings.json`, database) must be listed under `### 設定變更`. After adding a setting, run
-  `.venv/Scripts/python.exe tests/test_settings_compat.py --update-snapshot`.
+- Release: see *Packaging, updates and licence*. On `develop` (or `hotfix`) bump `version` and turn `[Unreleased]` into
+  `## [x.y.z] - date`, open the PR into `main`, merge after CI, tag `vX.Y.Z` on `main`; the release workflow builds and
+  publishes, and the launcher updates from that release. Then merge `main` back into `develop`.
 - Not committed (see `.gitignore`): `docs/private/`, `src/vibe_launcher/assets/brand/`, `.local-test/`, databases,
   keys, `.env`. Check the ignore rules before adding such files.
 - Only own code and compatibly licensed third-party files (keep their LICENSE); no third-party trademarks, fonts or screenshots.
