@@ -165,8 +165,10 @@ def test_apply_release_backs_up_downloads_verifies_then_starts_the_installer(fro
     runtime.private_dir(old)
     (old / "leftover.exe").write_bytes(b"old")
     assert updates.apply_release(data_root) == 0
-    output = capsys.readouterr().out
-    assert "已備份" in output
+    shown = json.loads((data_root / updates.PROGRESS_NAME).read_text(encoding="utf-8"))
+    assert shown["state"] == "launched" and shown["step"] == 4 and len(shown["stages"]) == 4 and shown["to"] == "0.2.0"
+    assert shown["from"] == "0.1.0" and shown["total"] == shown["done"] == len(installer), "the download size is reported"
+    assert shown["versions"] == ["0.2.0"]
     (target,) = started
     assert target[0].endswith("Vibe-Launcher-Setup-0.2.0.exe") and "/CLOSEAPPLICATIONS" in target and "/SILENT" in target and "/RESTARTAPPLICATIONS" not in target
     assert [p.name for p in old.iterdir()] == ["Vibe-Launcher-Setup-0.2.0.exe"], "earlier downloads are removed"
@@ -183,6 +185,8 @@ def test_apply_release_stops_cleanly_when_the_download_cannot_be_verified(frozen
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("an unverified installer must never run"))
     assert updates.apply_release(data_root) == 4
     assert not list((data_root / "updates").glob("*.exe"))
+    shown = json.loads((data_root / updates.PROGRESS_NAME).read_text(encoding="utf-8"))
+    assert shown["state"] == "failed" and shown["step"] == 3 and shown["message"], "the window can say what went wrong"
 
 
 # --------------------------------------------------------------------------------- release pipeline
@@ -231,6 +235,7 @@ def test_installer_file_names_agree_between_the_script_the_pipeline_and_the_upda
     assert "OutputBaseFilename=Vibe-Launcher-Setup-{#AppVersion}" in iss and "Vibe-Launcher-Setup-*.exe" in flow
     assert updates.SUMS_NAME in flow and updates.SUMS_NAME in build
     assert "PrivilegesRequired=lowest" in iss and "CloseApplications=yes" in iss, "the silent update needs no administrator"
+    assert 'Name: "{app}\_internal"' in iss and "[InstallDelete]" in iss, "an update must not leave the old version's metadata behind"
     spec = (root / "packaging" / "vibe-launcher.spec").read_text(encoding="utf-8")
     assert "upx=False" in spec and "console=False" in spec and "console=True" in spec and "runtime.py" in spec
     assert "collect_all" not in spec, "collect only what the launcher imports; the build must stay small"
@@ -241,3 +246,131 @@ def test_the_packaging_procedure_is_a_tracked_skill():
     skill = (root / ".agents" / "skills" / "package-release" / "SKILL.md").read_text(encoding="utf-8")
     assert skill.startswith("---\nname: package-release\ndescription: ") and "packaging/build.ps1" in skill
     assert "package-release" in (root / "AGENTS.md").read_text(encoding="utf-8")
+
+
+def test_the_exe_icon_is_the_in_app_logo_on_its_round_plate(qapp):
+    import importlib.util
+    import struct
+
+    from PySide6.QtGui import QImage
+
+    spec = importlib.util.spec_from_file_location("make_icon", SRC.parents[1] / "packaging" / "make_icon.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    ico = module.build_ico()
+    assert struct.unpack("<HHH", ico[:6]) == (0, 1, len(module.SIZES))
+    image = QImage.fromData(module.png_bytes(64), "PNG")
+    assert image.pixelColor(0, 0).alpha() == 0                      # corners are transparent: a round plate, not a white square
+    assert image.pixelColor(8, 32).alpha() == 255 and image.pixelColor(8, 32).name() != "#ffffff"
+
+
+def test_changelog_notes_come_in_two_languages_and_can_be_copied():
+    sample = chr(10).join(["## [0.3.0] - 2026-10-12", "", "- 中文一", "- 中文二", "", "### English", "", "- English one", "- English two", ""])
+    parsed = updates.parse_changelog(sample)["0.3.0"]
+    assert parsed["notes"] == ["中文一", "中文二"] and parsed["notes_en"] == ["English one", "English two"]
+    assert updates.notes_for(parsed, "zh-TW") == parsed["notes"] and updates.notes_for(parsed, "ja") == parsed["notes_en"]
+    assert updates.notes_for({"notes": ["只有中文"]}, "en") == ["English release notes are unavailable for this version."]
+    text = updates.release_text([{"version": "0.3.0", "date": "2026-10-12", **parsed}])
+    assert text.startswith("v0.3.0 (2026-10-12)") and "- 中文一" in text and "[English]" in text and "- English two" in text
+    shipped = updates.parse_changelog((Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8"),
+                                      include_unreleased=True)
+    latest = shipped.get("Unreleased") or shipped[updates.current_version()]
+    assert latest["notes"] and latest["notes_en"], "the current release carries Chinese and English notes"
+
+
+def test_the_update_window_follows_the_helper_progress_file(qapp, qtbot, tmp_path):
+    from vibe_launcher.update_dialog import UpdateDialog
+    releases = [{"version": "0.3.0", "date": "2026-10-12", "notes": ["中文"], "notes_en": ["English"]}]
+    dialog = UpdateDialog(["unused"], tmp_path, releases)
+    qtbot.addWidget(dialog)
+    stages = ["Look", "Back up", "Download", "Install"]
+    base = {"stages": stages, "from": "0.2.1", "to": "0.3.0", "state": "running"}
+
+    def show(**fields):
+        runtime.write_json(tmp_path / updates.PROGRESS_NAME, {**base, **fields})
+        dialog.poll()
+
+    show(step=3, done=5 * 1024 * 1024, total=20 * 1024 * 1024, detail="Vibe-Launcher-Setup-0.3.0.exe")
+    assert dialog.bar.maximum() == 100 and dialog.bar.value() == 25 and "5.0 MB" in dialog.detail.text()
+    assert dialog.step_labels[0].text().startswith("✓") and dialog.step_labels[2].text().startswith("●")
+    assert dialog.versions.text() == "v0.2.1 → v0.3.0" and not dialog.close_button.isEnabled()
+    launched = []
+    dialog.launched.connect(lambda: launched.append(True))
+    show(step=4, state="launched")
+    assert dialog.bar.maximum() == 0, "indeterminate while the installer replaces files"
+    assert launched == [True] and "0" in dialog.message.text() and not dialog.close_button.isEnabled()
+    assert dialog.step_labels[3].text().startswith("●"), "the install step is still running while the installer works"
+    dialog._launched_at -= 200                    # the installer never closed the launcher: the user is not trapped
+    dialog.poll()
+    assert dialog.close_button.isEnabled() and dialog.folder_button.isVisibleTo(dialog)
+    dialog._launched_at = __import__("time").monotonic()
+    show(step=3, state="failed", message="No network")
+    assert dialog.step_labels[2].text().startswith("✕") and dialog.message.text() == "No network" and dialog.close_button.isEnabled()
+    dialog.copy_notes()
+    from PySide6.QtGui import QGuiApplication
+    assert "中文" in QGuiApplication.clipboard().text() and "English" in QGuiApplication.clipboard().text()
+    assert dialog.grab().width() > 0
+
+
+@pytest.mark.parametrize("system,expected", [("zh_TW", "中文"), ("zh-Hant", "中文"), ("zh_HK", "中文"),
+                                            ("zh_MO", "中文"), ("zh_CN", "English"), ("zh-Hans-TW", "English"),
+                                            ("en_US", "English"), ("ja_JP", "English"), ("de_DE", "English")])
+def test_update_notes_follow_system_language_not_interface(monkeypatch, system, expected):
+    from vibe_launcher import i18n
+    i18n.set_language("en" if expected == "中文" else "zh-TW")
+    monkeypatch.setattr(updates, "_system_language", lambda: system)
+    assert updates.notes_for({"notes": ["中文"], "notes_en": ["English"]}) == [expected]
+
+
+def test_windows_notes_use_display_language(monkeypatch):
+    import ctypes
+    import os
+    if os.name != "nt":
+        pytest.skip("Windows display language")
+    monkeypatch.setattr(ctypes.windll.kernel32, "GetUserDefaultUILanguage", lambda: 0x0404)
+    assert updates._system_language() == "zh_TW"
+    monkeypatch.setattr(ctypes.windll.kernel32, "GetUserDefaultUILanguage", lambda: 0x0804)
+    assert updates.notes_for({"notes": ["中文"], "notes_en": ["English"]}) == ["English"]
+
+
+@pytest.mark.parametrize("reported", ["running", "done", "current", "launched"])
+def test_update_helper_failure_overrides_progress_success(qapp, qtbot, tmp_path, reported):
+    from types import SimpleNamespace
+    from vibe_launcher.update_dialog import UpdateDialog
+    dialog = UpdateDialog(["unused"], tmp_path, [])
+    qtbot.addWidget(dialog)
+    dialog._process = SimpleNamespace(poll=lambda: 7)
+    started = []
+    dialog.launched.connect(lambda: started.append(True))
+    runtime.write_json(tmp_path / updates.PROGRESS_NAME, {"state": reported, "step": 4, "stages": []})
+    dialog.poll()
+    assert dialog._state == "failed" and "7" in dialog.message.text()
+    assert dialog.close_button.isEnabled() and not started
+
+
+def test_update_success_waits_for_helper_exit(qapp, qtbot, tmp_path):
+    from types import SimpleNamespace
+    from vibe_launcher.update_dialog import UpdateDialog
+    dialog = UpdateDialog(["unused"], tmp_path, [])
+    qtbot.addWidget(dialog)
+    dialog._process = SimpleNamespace(poll=lambda: None)
+    runtime.write_json(tmp_path / updates.PROGRESS_NAME, {"state": "done", "step": 4, "stages": []})
+    dialog.poll()
+    assert dialog._state == "running" and not dialog.close_button.isEnabled()
+    dialog._process = SimpleNamespace(poll=lambda: 0)
+    dialog.poll()
+    assert dialog._state == "done" and dialog.close_button.isEnabled()
+
+
+def test_both_update_screens_show_system_selected_notes(qapp, qtbot, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QLabel
+    from vibe_launcher import i18n
+    from vibe_launcher.about import ReleaseCard
+    from vibe_launcher.update_dialog import UpdateDialog
+    i18n.set_language("zh-TW")
+    monkeypatch.setattr(updates, "_system_language", lambda: "ja_JP")
+    release = {"version": "0.2.2", "date": "", "notes": ["中文資訊"], "notes_en": ["English notes"]}
+    for widget in (ReleaseCard(release), UpdateDialog(["unused"], tmp_path, [release])):
+        qtbot.addWidget(widget)
+        texts = [label.text() for label in widget.findChildren(QLabel)]
+        assert "• English notes" in texts and "• 中文資訊" not in texts

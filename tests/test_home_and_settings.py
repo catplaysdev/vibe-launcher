@@ -209,3 +209,54 @@ def test_sessions_filter_and_single_toolbar(view):
     assert view.sessions_list.count() == 3
 
 
+
+
+def test_starting_an_update_closes_the_settings_window_so_the_progress_is_not_covered(view, monkeypatch):
+    from vibe_launcher import selfcmd, update_dialog
+    monkeypatch.setattr(selfcmd, "frozen", lambda: True)
+    monkeypatch.setattr(update_dialog.UpdateDialog, "start", lambda self: None)
+    monkeypatch.setattr(view, "_confirm", lambda *a, **k: True)
+    settings = SettingsDialog(view, "about")
+    settings.show()
+    assert settings.isVisible()
+    view.apply_update()
+    assert not settings.isVisible() and view._update_dialog.isVisible()
+    view._update_dialog.close()
+
+
+def test_the_installed_version_shows_without_checking_and_stale_results_are_ignored(view, monkeypatch):
+    from vibe_launcher import updates
+    from vibe_launcher.about import AboutPanel
+    monkeypatch.setattr(updates, "current_version", lambda: "0.2.1")
+    view._update_report = None
+    updates.runtime.write_json(view.store.path.parent / updates.CACHE_NAME, {
+        "status": "update_available", "current": "0.2.0", "latest": "0.2.1", "checked_at": "t", "message": "",
+        "releases": [{"version": "0.2.1", "date": "", "notes": []}]})
+    assert view.update_report() is None, "a result recorded by an older version is not shown"
+    panel = AboutPanel(view)
+    assert "0.2.1" in panel.version.text() and "0.2.0" not in panel.version.text()
+    assert "0.2.1" in view.windowTitle() or view.windowTitle().startswith("Vibe Launcher")
+
+
+def test_repeated_update_requests_reuse_the_active_dialog(view, monkeypatch):
+    from vibe_launcher import selfcmd, update_dialog
+    monkeypatch.setattr(selfcmd, "frozen", lambda: True)
+    starts = []
+    monkeypatch.setattr(update_dialog.UpdateDialog, "start", lambda dialog: starts.append(dialog))
+    monkeypatch.setattr(view, "_confirm", lambda *a, **k: True)
+    view.apply_update()
+    first = view._update_dialog
+    monkeypatch.setattr(view, "_confirm", lambda *a, **k: pytest.fail("must reuse the running update"))
+    view.apply_update()
+    assert view._update_dialog is first and starts == [first]
+    first._fail("Failed")
+    first.close()
+
+
+def test_confirmed_installer_update_closes_without_a_second_modal(view, monkeypatch):
+    view.open_terminal("project", "shell")
+    assert view.workspace.current_tabs()[0].alive()
+    view.prefs.minimize_to_tray = True
+    view._installer_started()
+    monkeypatch.setattr(view, "_confirm", lambda *a, **k: pytest.fail("update already confirmed ending local terminals"))
+    assert view.close() and not view.isVisible()
