@@ -87,11 +87,13 @@ from .kit import (
     retheme_widgets,
 )
 from .appearance import AppearanceDialog
+from .update_dialog import UpdateDialog
 from .theme import C, R, S, Size, T, TOOL_ICONS, section_hue
 
 TOOL_NAMES = {"codex": "Codex", "claude": "Claude", "deepseek-harness": tr('ui.f241687ec5a7')}
 from .work_drawer import WorkDrawer, WorkRow
 from . import project_icons
+from . import tray as tray_module
 from .workspace_page import DEFAULT_ICON_KEY, WORKSPACE_GLYPH, WorkspacePage
 from .ui_format import _display_time, _value
 from .ui_integrations import IntegrationActions
@@ -362,12 +364,15 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         self.service = service
         self._terminal_factory = terminal_factory
         self.prefs = _load_prefs(store)
+        self._tray = None                       # created the first time the window is closed to the tray
+        self._quitting = False                  # set while quitting for real (tray Quit, installer update)
         theme.apply_theme(self.prefs.theme, self.prefs.accent)
         theme.set_fonts(self.prefs.ui_font, self.prefs.terminal_font)
         apply_fonts((theme.families(), theme.families(mono=True)))      # the application default for widgets created next
         terminal_module.configure(font_size=self.prefs.terminal_font_size, cursor_blink=self.prefs.cursor_blink)
         project_icons.configure(store.path.parent, self.prefs.project_icons)
-        self.setWindowTitle("Vibe Launcher")
+        from . import updates
+        self.setWindowTitle(f"Vibe Launcher {updates.current_version()}")
         self.resize(1180, 760)
         self.setMinimumSize(640, 520)
         self._records: dict[str, list[dict[str, Any]]] = {}
@@ -1433,7 +1438,39 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         self.workspace.set_compact(width < 1000)
         self.env_page.set_layout_mode("drawer" if narrow else "split")
 
+    def _hide_to_tray(self) -> bool:
+        """Close-to-tray: hide the window and keep everything running. False when the tray is off or unavailable."""
+        if not self.prefs.minimize_to_tray or getattr(self, "_quitting", False) or not tray_module.available():
+            return False
+        first = getattr(self, "_tray", None) is None
+        if first:
+            self._tray = tray_module.TrayIcon(self, on_open=self._show_from_tray, on_quit=self._quit_from_tray)
+        QApplication.instance().setQuitOnLastWindowClosed(False)
+        self._tray.show()
+        if first:
+            self._tray.showMessage("Vibe Launcher", tr("Still running in the system tray. Click the icon to reopen it."),
+                                   self._tray.MessageIcon.Information, 4000)
+        self.hide()
+        return True
+
+    def _show_from_tray(self) -> None:
+        QApplication.instance().setQuitOnLastWindowClosed(True)
+        if getattr(self, "_tray", None) is not None:
+            self._tray.hide()
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_from_tray(self) -> None:
+        self._show_from_tray()
+        self._quitting = True
+        if not self.close():                    # the user kept the terminals open
+            self._quitting = False
+
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._hide_to_tray():
+            event.ignore()
+            return
         alive = [tab for tab in self.workspace.tabs() if tab.alive()] if hasattr(self, "workspace") else []
         kept = sum(1 for tab in alive if tab.info.tmux)          # survives on its server
         ending = len(alive) - kept                                # local, or SSH without tmux: ends with the terminal
@@ -1444,7 +1481,7 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         else:
             message = tr("{count} terminal(s) are connected. Their work keeps running on the server in tmux and can be reconnected from Sessions.",
                          count=kept)
-        if alive and not self._confirm(tr('ui.8e865844985b'), message, confirm_text=tr('ui.c76448f6bfff'), danger=True):
+        if alive and not getattr(self, "_installing_update", False) and not self._confirm(tr('ui.8e865844985b'), message, confirm_text=tr('ui.c76448f6bfff'), danger=True):
             event.ignore()
             return
         if hasattr(self, "workspace"):
@@ -2167,7 +2204,9 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
     def update_report(self) -> dict[str, Any] | None:
         if self._update_report is None:
             from . import updates
-            self._update_report = updates.load_cached(self.store.path.parent) or {}
+            cached = updates.load_cached(self.store.path.parent) or {}
+            # A result recorded by another version (before an update or downgrade) says nothing about this one.
+            self._update_report = cached if cached.get("current") == updates.current_version() else {}
         return self._update_report or None
 
     def check_updates(self, force: bool = True) -> None:
@@ -2203,7 +2242,13 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
                            latest=report.get("latest", "")), "info")
 
     def apply_update(self) -> None:
-        """Back up settings, then update in a terminal."""
+        """Back up settings, then show one update operation at a time."""
+        active = getattr(self, "_update_dialog", None)
+        if active is not None and active.in_progress():
+            active.show()
+            active.raise_()
+            active.activateWindow()
+            return
         from . import updates
         repo = updates.repo_root()
         report = self.update_report() or {}
@@ -2221,18 +2266,23 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
                    tr("Your data is backed up first. Restart the launcher afterwards."))
         if not self._confirm(tr("Update Vibe Launcher"), message, confirm_text=tr("Update")):
             return
-        data = str(self.store.path.parent)
-        args = (selfcmd.command("updates", "apply-release", "--data", data) if packaged
-                else selfcmd.command("updates", "apply", "--repo", str(repo), "--data", data))
-        try:
-            if self._embedded_enabled():
-                self.workspace.spawn(args, {"action": "update-app", "operation_title": tr("Update Vibe Launcher"),
-                                            "operation_account_name": f"v{report.get('latest', '')}"})
-                self.show_page("workspace")
-            else:
-                subprocess.Popen(args, creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0), close_fds=True)
-        except Exception as exc:
-            self._error(tr("Update Vibe Launcher"), exc)
+        from .settings_dialog import SettingsDialog
+        for widget in QApplication.topLevelWidgets():          # Settings is modal and would cover the update window
+            if isinstance(widget, SettingsDialog) and widget.isVisible():
+                widget.reject()
+        data = self.store.path.parent
+        args = (selfcmd.command("updates", "apply-release", "--data", str(data)) if packaged
+                else selfcmd.command("updates", "apply", "--repo", str(repo), "--data", str(data)))
+        dialog = UpdateDialog(args, data, report.get("releases", []), self)
+        dialog.launched.connect(self._installer_started)
+        self._update_dialog = dialog
+        dialog.show()
+        dialog.start()
+
+    def _installer_started(self) -> None:
+        # apply_update already confirmed that updating ends local terminals.
+        self._quitting = True
+        self._installing_update = True
 
     def _by_id(self, kind: str, record_id: str) -> dict[str, Any]:
         return next((r for r in self._records.get(kind, []) if r.get("id") == record_id), {})

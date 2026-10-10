@@ -97,7 +97,7 @@ window, `vibe-launcher-cli.exe` for helpers; one folder, one set of files). Ther
 in git and maintained by Codex; Claude Code may read it but edits go through Codex). In short: `powershell -File packaging/build.ps1` builds `dist-app/Vibe Launcher/` (about 370 MB
 on disk, idle about 95 MB of memory, measured offscreen without a terminal), self-tests it and, with Inno Setup 6, builds the
 installer and `SHA256SUMS.txt`. Keep it small and quiet: no UPX, no `collect_all`, no extra Qt modules without a reason,
-Chromium language packs cut to the shipped languages, no tray icon, no background service, no updater process. Resource
+Chromium language packs cut to the shipped languages, tray icon only while the user has turned on minimize-to-tray, no background service, no updater process. Resource
 budget for anything new: nothing runs between user actions except the update check (one small HTTPS request, at most every
 six hours, can be switched off), and downloads are streamed to disk in 256 KB pieces, never held in memory.
 
@@ -113,7 +113,9 @@ six hours, can be switched off), and downloads are streamed to disk in 256 KB pi
 - Data in `%LOCALAPPDATA%\VibeLauncher` is never written inside the install folder and survives install, update and
   uninstall; both channels back it up before updating.
 
-**Releasing.** On `develop` or `hotfix`: bump `version`, turn `[Unreleased]` into `## [x.y.z] - date`; merge the PR
+**Releasing.** Every CHANGELOG section lists Chinese bullets, then the same notes in English under `### English` (the update
+window selects notes by system display language: Traditional Chinese systems use Chinese, all others use English;
+copy includes both). On `develop` or `hotfix`: bump `version`, turn `[Unreleased]` into `## [x.y.z] - date`; merge the PR
 into `main`, tag `vx.y.z` on `main`;
 `.github/workflows/release.yml` tests, builds, self-tests and publishes the installer, checksum and notes (full steps in the
 skill). A release without both assets is invisible to the updater. The v0.1.0 program folder build and packaged self-test

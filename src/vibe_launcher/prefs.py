@@ -92,6 +92,7 @@ class UiPrefs:
         self.composer_position = "bottom"
         self.toast_anchor: list[float] | None = None   # [x_ratio, y_ratio] in the window; None = default corner
         self.update_check = True                # look for newer launcher versions in the background
+        self.minimize_to_tray = False           # closing the window hides it to the system tray instead of quitting
         self.sessions_grouping = "workspace"    # Sessions page: workspace > project > terminal, or one list by "time"
         self._load()
 
@@ -139,6 +140,7 @@ class UiPrefs:
             self.shortcuts = {}
         self.toast_anchor = valid_anchor(data.get("toast_anchor"))
         self.update_check = data.get("update_check", True) is not False
+        self.minimize_to_tray = data.get("minimize_to_tray", False) is True
         self.sessions_grouping = "time" if data.get("sessions_grouping") == "time" else "workspace"
 
     def snapshot(self) -> dict:
@@ -156,6 +158,7 @@ class UiPrefs:
                 "ui_scale": valid_ui_scale(self.ui_scale), "cursor_blink": self.cursor_blink, "composer_default": self.composer_default,
                 "language": self.language, "shortcuts": dict(self.shortcuts), "composer_position": self.composer_position,
                 "toast_anchor": valid_anchor(self.toast_anchor), "update_check": bool(self.update_check),
+                "minimize_to_tray": bool(self.minimize_to_tray),
                 "sessions_grouping": self.sessions_grouping}
 
     def save(self) -> None:

@@ -10,7 +10,9 @@ UI-side only (never shipped to SSH hosts). Two channels share one report format,
 
 Only versions newer than the installed one are reported. Applying an update backs up the user's data first and never edits
 settings: anything a release removes or changes is listed under ``### 設定變更`` in CHANGELOG.md so the user is warned
-before updating.
+before updating. Each CHANGELOG section lists its notes in Traditional Chinese first and, after an ``### English`` heading,
+again in English; update notes use Traditional Chinese only for Traditional Chinese system display languages,
+and English for every other system. Progress messages follow the interface language.
 
     python -m vibe_launcher.updates check [--repo PATH] [--data PATH]
     python -m vibe_launcher.updates apply --repo PATH --data PATH
@@ -28,12 +30,14 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import runtime, selfcmd
+from .i18n import tr
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +52,7 @@ INSTALLER_LIMIT = 800 * 1024 * 1024
 CHUNK = 256 * 1024                    # downloads are streamed to disk in pieces this size; memory use stays flat
 UPDATES_DIR = "updates"
 CACHE_NAME = "app-update.json"
+PROGRESS_NAME = "update-progress.json"       # what the update window shows while apply / apply-release runs
 CACHE_LIMIT = 262144
 CHANGELOG_LIMIT = 256 * 1024
 FETCH_TIMEOUT = 30
@@ -59,6 +64,7 @@ DATABASE_NAME = "vibe-launcher.sqlite3"
 STATUSES = {"update_available", "current", "unavailable"}
 TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
 SEMVER = re.compile(r"\d+\.\d+\.\d+")
+ENGLISH_HEADING = re.compile(r"^###\s+English\s*$", re.IGNORECASE)
 SECTION = re.compile(r"^##\s+\[([^\]]+)\](?:\s*[-–—]\s*(\S+))?\s*$")
 BACKUP_DIR = re.compile(r"^[0-9A-Za-z.+_-]+-(\d{8}T\d{6}Z)(?:-(\d+))?$")
 
@@ -79,21 +85,24 @@ def repo_root() -> Path | None:
 
 
 def parse_changelog(text: str, *, include_unreleased: bool = False) -> dict[str, dict]:
-    """``## [x.y.z] - date`` sections -> {version: {"date", "notes"}}: every bullet is a release note.
+    """``## [x.y.z] - date`` sections -> {version: {"date", "notes", "notes_en"}}: every bullet is a release note.
 
+    Bullets before an ``### English`` heading are the (Chinese) ``notes``; the ones after it are ``notes_en``.
     The ``[Unreleased]`` section is skipped unless asked for.
     """
     releases: dict[str, dict] = {}
     entry: dict | None = None
+    key = "notes"
     for line in text.splitlines():
         stripped = line.strip()
         match = SECTION.match(stripped)
         if match:
             name = match.group(1).strip()
             if SEMVER.fullmatch(name) or (include_unreleased and name.lower() == "unreleased"):
-                entry = releases.setdefault(name, {"date": match.group(2) or "", "notes": []})
+                entry = releases.setdefault(name, {"date": match.group(2) or "", "notes": [], "notes_en": []})
             else:
                 entry = None
+            key = "notes"
             continue
         if stripped.startswith("# ") and not stripped.startswith("## "):
             entry = None
@@ -101,13 +110,54 @@ def parse_changelog(text: str, *, include_unreleased: bool = False) -> dict[str,
         if entry is None:
             continue
         if stripped.startswith("###"):
+            key = "notes_en" if ENGLISH_HEADING.match(stripped) else "notes"
             continue
         if not stripped.startswith(("- ", "* ")):
             continue
         item = stripped[2:].strip()
         if item:
-            entry["notes"].append(item)
+            entry[key].append(item)
     return releases
+
+
+def _system_language() -> str:
+    """Windows display language, independent of the launcher's interface preference."""
+    import locale
+    if os.name == "nt":
+        import ctypes
+        try:
+            return locale.windows_locale.get(ctypes.windll.kernel32.GetUserDefaultUILanguage(), "en")
+        except (AttributeError, OSError):
+            return "en"
+    return locale.getlocale()[0] or "en"
+
+
+def notes_for(release: dict, language: str | None = None) -> list[str]:
+    """Traditional Chinese systems get Chinese notes; every other system gets English."""
+    chinese, english = release.get("notes") or [], release.get("notes_en") or []
+    parts = (language or _system_language()).replace("_", "-").lower().split("-")
+    traditional = parts[0] == "zh" and "hans" not in parts and (
+        "hant" in parts or any(region in parts[1:] for region in ("tw", "hk", "mo")))
+    if traditional:
+        return chinese or english
+    if english:
+        return english
+    # Older English-only releases stored their bullets in notes, without an English heading.
+    if chinese and not any(re.search(r"[\u3400-\u9fff]", note) for note in chinese):
+        return chinese
+    return ["English release notes are unavailable for this version."] if chinese else []
+
+
+def release_text(releases: list[dict]) -> str:
+    """Plain text of releases in both languages, for copying (e.g. into a translator)."""
+    blocks = []
+    for release in releases:
+        lines = [f"v{release.get('version', '')} ({release.get('date', '')})".replace(" ()", "")]
+        for title, key in (("繁體中文", "notes"), ("English", "notes_en")):
+            if release.get(key):
+                lines += [f"[{title}]"] + [f"- {note}" for note in release[key]]
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
 
 
 def _git_env() -> dict:
@@ -139,7 +189,7 @@ def check(repo: Path | None, data_root: Path, *, fetch: bool = True) -> dict:
         result.update(_check(repo, current, fetch))
     except Exception:  # never let a broken checkout or network take the launcher down
         log.exception("Update check failed")
-        result.update(status="unavailable", releases=[], message="檢查更新時發生錯誤。")
+        result.update(status="unavailable", releases=[], message=tr("Something went wrong while checking for updates."))
     try:
         runtime.write_json(Path(data_root) / CACHE_NAME, result)
     except (OSError, ValueError):
@@ -151,22 +201,22 @@ def _check(repo: Path | None, current: str, fetch: bool) -> dict:
     if selfcmd.frozen():
         return _check_release(current)
     if repo is None or not (Path(repo) / ".git").exists():
-        return {"message": "此版本不是從 git checkout 執行，無法自動檢查更新。"}
+        return {"message": tr("This copy is not a Git checkout, so it cannot check for updates by itself.")}
     try:
         git = runtime.trusted_executable("git")
     except RuntimeError:
-        return {"message": "找不到 git，無法檢查更新。"}
+        return {"message": tr("Git was not found, so updates cannot be checked.")}
     repo = Path(repo)
     if fetch:
         try:
             fetched = _git(git, repo, "fetch", "--tags", "--quiet", "origin", timeout=FETCH_TIMEOUT)
         except subprocess.TimeoutExpired:
-            return {"message": "連線更新來源逾時，請稍後再試。"}
+            return {"message": tr("The update source did not answer in time. Try again later.")}
         if fetched.returncode != 0:
-            return {"message": "無法連線到更新來源（git fetch 失敗）。"}
+            return {"message": tr("Cannot reach the update source (git fetch failed).")}
     listed = _git(git, repo, "tag", "--list", "v*")
     if listed.returncode != 0:
-        return {"message": "無法讀取版本標籤。"}
+        return {"message": tr("Cannot read the version tags.")}
     installed = runtime.version_number(current) or (0, 0, 0)
     tags = {}
     for line in listed.stdout.decode("utf-8", "replace").splitlines():
@@ -177,11 +227,12 @@ def _check(repo: Path | None, current: str, fetch: bool) -> dict:
     for number in sorted(tags, reverse=True)[:MAX_RELEASES]:
         version = "%d.%d.%d" % number
         entry = _release_notes(git, repo, tags[number]).get(version, {})
-        releases.append({"version": version, "date": entry.get("date", ""), "notes": entry.get("notes", [])})
+        releases.append({"version": version, "date": entry.get("date", ""), "notes": entry.get("notes", []),
+                         "notes_en": entry.get("notes_en", [])})
     if not releases:
-        return {"status": "current", "latest": current, "message": "已是最新版本。"}
+        return {"status": "current", "latest": current, "message": tr("You are on the latest version.")}
     return {"status": "update_available", "latest": releases[0]["version"], "releases": releases,
-            "message": f"有新版本 {releases[0]['version']} 可以更新。"}
+            "message": tr("Version {latest} can be installed.", latest=releases[0]["version"])}
 
 
 class _SameSite(urllib.request.HTTPRedirectHandler):
@@ -232,7 +283,9 @@ def _latest_releases(repo: str, installed: tuple[int, int, int]) -> list[dict]:
             continue            # not (yet) installable: the assets are uploaded after the release is created
         date = str(item.get("published_at") or "")[:10]
         notes = parse_changelog(f"## [{version}] - {date}\n" + str(item.get("body") or "")).get(version, {})
-        found.append({"version": version, "date": date, "notes": notes.get("notes", []),
+        size = installer.get("size")
+        found.append({"version": version, "date": date, "notes": notes.get("notes", []), "notes_en": notes.get("notes_en", []),
+                      "size": size if isinstance(size, int) and 0 < size <= INSTALLER_LIMIT else 0,
                       "installer_url": installer["browser_download_url"], "sums_url": sums["browser_download_url"]})
     return sorted(found, key=lambda r: runtime.version_number(r["version"]), reverse=True)[:MAX_RELEASES]
 
@@ -241,12 +294,12 @@ def _check_release(current: str) -> dict:
     try:
         found = _latest_releases(RELEASE_REPO, runtime.version_number(current) or (0, 0, 0))
     except (OSError, ValueError, urllib.error.URLError, TimeoutError):
-        return {"message": "無法連線到更新來源，請稍後再試。"}
+        return {"message": tr("Cannot reach the update source. Try again later.")}
     if not found:
-        return {"status": "current", "latest": current, "message": "已是最新版本。"}
-    releases = [{k: r[k] for k in ("version", "date", "notes")} for r in found]
+        return {"status": "current", "latest": current, "message": tr("You are on the latest version.")}
+    releases = [{k: r[k] for k in ("version", "date", "notes", "notes_en", "size")} for r in found]
     return {"status": "update_available", "latest": releases[0]["version"], "releases": releases,
-            "message": f"有新版本 {releases[0]['version']} 可以更新。"}
+            "message": tr("Version {latest} can be installed.", latest=releases[0]["version"])}
 
 
 def _checksum(sums: bytes, name: str) -> str:
@@ -257,7 +310,7 @@ def _checksum(sums: bytes, name: str) -> str:
     raise ValueError("No checksum for the installer")
 
 
-def _download(url: str, target: Path, expected: str, limit: int = INSTALLER_LIMIT) -> None:
+def _download(url: str, target: Path, expected: str, limit: int = INSTALLER_LIMIT, on_progress=None) -> None:
     """Stream ``url`` to ``target`` (a ``.part`` file first), checking size and SHA-256 before it gets its real name."""
     partial = target.with_name(target.name + ".part")
     digest, size = hashlib.sha256(), 0
@@ -274,6 +327,8 @@ def _download(url: str, target: Path, expected: str, limit: int = INSTALLER_LIMI
                     raise ValueError("The download is larger than expected")
                 digest.update(chunk)
                 out.write(chunk)
+                if on_progress is not None:
+                    on_progress(size, total)
                 if total and size * 10 // total > step:
                     step = size * 10 // total
                     print(f"    {step * 10}%", flush=True)
@@ -284,29 +339,80 @@ def _download(url: str, target: Path, expected: str, limit: int = INSTALLER_LIMI
         partial.unlink(missing_ok=True)
 
 
+class Progress:
+    """The update window's view of a running apply: ``<data>/update-progress.json``, written atomically.
+
+    Display only. Whether the update worked is decided by the exit code, never by this file.
+    """
+
+    def __init__(self, data_root: Path, stages: list[str], to_version: str = "") -> None:
+        self.path = Path(data_root) / PROGRESS_NAME
+        self.data = {"stages": stages, "step": 0, "state": "running", "from": current_version(), "to": to_version,
+                     "done": 0, "total": 0, "detail": "", "message": "", "pid": os.getpid(), "started": _now(), "at": _now()}
+        self._last = 0.0
+        self.write()
+
+    def write(self, **fields) -> None:
+        self.data.update(fields, at=_now())
+        try:
+            runtime.write_json(self.path, self.data)
+        except (OSError, ValueError):
+            log.warning("Cannot write the update progress")
+
+    def stage(self, step: int, **fields) -> None:
+        """Enter stage ``step`` (1-based) of the list and print its line."""
+        print(f"{step}/{len(self.data['stages'])} {self.data['stages'][step - 1]}…", flush=True)
+        self.write(**{"step": step, "done": 0, "total": 0, "detail": "", **fields})
+
+    def bytes(self, done: int, total: int) -> None:
+        now = time.monotonic()
+        if now - self._last >= 0.25 or (total and done >= total):
+            self._last = now
+            self.write(done=done, total=total)
+
+    def finish(self, state: str, message: str, code: int) -> int:
+        print(message, flush=True)
+        self.write(state=state, message=message)
+        return code
+
+
+def use_interface_language(data_root: Path) -> None:
+    """Helper processes print in the language the launcher window uses (read from its ``ui-state.json``)."""
+    from . import i18n
+    try:
+        value = json.loads(runtime.read_private(Path(data_root) / "ui-state.json")).get("language")
+    except (OSError, ValueError, AttributeError):
+        return
+    if value in i18n.LANGUAGES:
+        i18n.set_language(value)
+
+
 def apply_release(data_root: Path) -> int:
     """Interactive update of a packaged build: newest release -> backup -> download + verify -> run the installer."""
-    print("== Vibe Launcher 更新 ==", flush=True)
     data_root = Path(data_root)
-    print("1/4 查詢新版本…", flush=True)
+    use_interface_language(data_root)
+    print("== " + tr("Vibe Launcher update") + " ==", flush=True)
+    progress = Progress(data_root, [tr("Look for the new version"), tr("Back up your data"),
+                                    tr("Download and verify the installer"), tr("Start the installer")])
+    progress.stage(1)
     try:
         found = _latest_releases(RELEASE_REPO, runtime.version_number(current_version()) or (0, 0, 0))
     except (OSError, ValueError, urllib.error.URLError, TimeoutError):
-        print("無法連線到更新來源，程式與資料都沒有被修改。")
-        return 4
+        return progress.finish("failed", tr("Cannot reach the update source. Nothing was changed."), 4)
     if not found:
-        print("已是最新版本。")
-        return 0
+        return progress.finish("current", tr("You are on the latest version."), 0)
     release = found[0]
-    print(f"    最新版本 {release['version']}", flush=True)
-    print("2/4 備份使用者資料…", flush=True)
+    total = int(release.get("size") or 0)
+    progress.write(to=release["version"], total=total, versions=[r["version"] for r in found])
+    print("    " + tr("Latest version {version}", version=release["version"]), flush=True)
+    progress.stage(2)
     try:
         folder = backup_user_data(data_root, current_version())
     except (OSError, ValueError, sqlite3.Error) as error:
-        print(f"備份失敗，已停止更新：{type(error).__name__}")
-        return 3
-    print(f"    已備份到 {folder}")
-    print("3/4 下載安裝程式並驗證…", flush=True)
+        return progress.finish("failed", tr("The backup failed, so the update was stopped: {error}", error=type(error).__name__), 3)
+    print("    " + tr("Backed up to {path}", path=folder))
+    progress.write(detail=str(folder))
+    progress.stage(3, total=total)
     name = f"Vibe-Launcher-Setup-{release['version']}.exe"
     downloads = data_root / UPDATES_DIR
     try:
@@ -315,21 +421,23 @@ def apply_release(data_root: Path) -> int:
             if old.is_file() and not old.is_symlink():
                 old.unlink(missing_ok=True)        # earlier downloads are never reused
         expected = _checksum(_read(release["sums_url"], SUMS_LIMIT), name)
+        progress.write(detail=name)
         target = downloads / name
-        _download(release["installer_url"], target, expected)
+        _download(release["installer_url"], target, expected, on_progress=progress.bytes)
     except (OSError, ValueError, urllib.error.URLError, TimeoutError) as error:
-        print(f"下載或驗證失敗（{type(error).__name__}），程式與資料都沒有被修改。")
-        return 4
-    print("4/4 啟動安裝程式…", flush=True)
+        return progress.finish("failed", tr("The download or its check failed ({error}). Nothing was changed.",
+                                            error=type(error).__name__), 4)
+    size = target.stat().st_size
+    progress.write(detail=tr("{name} (checksum verified)", name=name), done=size, total=size)
+    progress.stage(4, done=size, total=size, detail=tr("{name} (checksum verified)", name=name))
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     try:
         subprocess.Popen([str(target), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"],
                          creationflags=flags, close_fds=True, stdin=subprocess.DEVNULL)
     except OSError:
-        print(f"無法啟動安裝程式。已驗證的檔案在：{target}，可手動執行。")
-        return 5
-    print("安裝程式已啟動：它會關閉 Vibe Launcher、更新檔案後自動重新開啟。")
-    return 0
+        return progress.finish("failed", tr("The installer could not be started. The verified file is at {path}; you can run it by hand.",
+                                            path=target), 5)
+    return progress.finish("launched", tr("The installer has started: it closes Vibe Launcher, replaces the files and reopens it."), 0)
 
 
 def _release_notes(git: str, repo: Path, tag: str) -> dict[str, dict]:
@@ -346,7 +454,9 @@ def _strings(value: object, limit: int = 200) -> bool:
 def _valid_release(item: object) -> bool:
     if not isinstance(item, dict) or not isinstance(item.get("version"), str) or not SEMVER.fullmatch(item["version"]):
         return False
-    return isinstance(item.get("date"), str) and _strings(item.get("notes"))
+    size = item.get("size", 0)
+    return (isinstance(item.get("date"), str) and _strings(item.get("notes")) and _strings(item.get("notes_en", []))
+            and isinstance(size, int) and not isinstance(size, bool) and 0 <= size <= INSTALLER_LIMIT)
 
 
 def load_cached(data_root: Path) -> dict | None:
@@ -369,15 +479,15 @@ def working_tree_clean(repo: Path) -> tuple[bool, str]:
         git = runtime.trusted_executable("git")
         status = _git(git, Path(repo), "status", "--porcelain", "--untracked-files=no")
     except (RuntimeError, OSError, subprocess.TimeoutExpired):
-        return False, "無法執行 git status。"
+        return False, tr("Cannot run git status.")
     if status.returncode != 0:
-        return False, "無法讀取 git 狀態（不是 git checkout？）。"
+        return False, tr("Cannot read the git status (not a Git checkout?).")
     changed = [line[3:] for line in status.stdout.decode("utf-8", "replace").splitlines() if line.strip()]
     if not changed:
         return True, ""
     shown = "\n".join("  " + path for path in changed[:10])
-    more = f"\n  …另有 {len(changed) - 10} 個檔案" if len(changed) > 10 else ""
-    return False, f"有 {len(changed)} 個檔案尚未提交：\n{shown}{more}"
+    more = "\n  " + tr("…and {count} more file(s)", count=len(changed) - 10) if len(changed) > 10 else ""
+    return False, tr("{count} file(s) have uncommitted changes:", count=len(changed)) + f"\n{shown}{more}"
 
 
 def backup_user_data(data_root: Path, version: str) -> Path:
@@ -434,51 +544,47 @@ def _prune(backups: Path, keep: int = KEEP_BACKUPS) -> None:
 
 def apply(repo: Path, data_root: Path) -> int:
     """Interactive update for an embedded terminal: clean tree -> backup -> warn -> pull --ff-only -> uv sync."""
-    print("== Vibe Launcher 更新 ==", flush=True)
+    use_interface_language(data_root)
+    print("== " + tr("Vibe Launcher update") + " ==", flush=True)
+    progress = Progress(data_root, [tr("Check local changes"), tr("Back up your data"),
+                                    tr("Download the update (git pull --ff-only)"), tr("Update dependencies (uv sync)")])
     if not (Path(repo) / ".git").exists():
-        print("找不到 git checkout，無法自動更新。")
-        return 1
+        return progress.finish("failed", tr("No Git checkout was found, so it cannot update itself."), 1)
     try:
         git = runtime.trusted_executable("git")
     except RuntimeError:
-        print("找不到 git，請先安裝 Git for Windows。")
-        return 1
-    print("1/4 檢查本機修改…", flush=True)
+        return progress.finish("failed", tr("Git was not found. Install Git for Windows first."), 1)
+    progress.stage(1)
     clean, message = working_tree_clean(repo)
     if not clean:
-        print("程式目錄有未提交的變更，為避免覆蓋已停止更新。\n" + message)
-        print("請先提交、暫存（git stash）或還原這些變更後再試。")
-        return 2
-    print("2/4 備份使用者資料…", flush=True)
+        print(tr("The program folder has uncommitted changes; the update was stopped so they are not overwritten.") + "\n" + message)
+        return progress.finish("failed", tr("Commit, stash (git stash) or discard these changes first, then try again."), 2)
+    progress.stage(2)
     try:
         folder = backup_user_data(data_root, current_version())
     except (OSError, ValueError, sqlite3.Error) as error:
-        print(f"備份失敗，已停止更新：{type(error).__name__}")
-        return 3
-    print(f"    已備份到 {folder}")
-    print("3/4 下載更新（git pull --ff-only）…", flush=True)
+        return progress.finish("failed", tr("The backup failed, so the update was stopped: {error}", error=type(error).__name__), 3)
+    print("    " + tr("Backed up to {path}", path=folder))
+    progress.write(detail=str(folder))
+    progress.stage(3)
     try:
         pulled = subprocess.call([git, "-C", str(repo), "pull", "--ff-only"], env=_git_env())
     except OSError:
         pulled = 1
     if pulled != 0:
-        print("下載更新失敗（可能是網路、權限，或本機分支已分岔）。程式與資料都沒有被修改。")
-        return 4
-    print("4/4 更新相依套件（uv sync）…", flush=True)
+        return progress.finish("failed", tr("The download failed (network, permission, or the local branch has diverged). Nothing was changed."), 4)
+    progress.stage(4)
     try:
         uv = runtime.trusted_executable("uv")
     except RuntimeError:
-        print("找不到 uv。程式碼已更新，請安裝 uv（https://docs.astral.sh/uv/）後在程式目錄執行：uv sync")
-        return 5
+        return progress.finish("failed", tr("uv was not found. The code is updated; install uv (https://docs.astral.sh/uv/) and run `uv sync` in the program folder."), 5)
     try:
         synced = subprocess.call([uv, "sync"], cwd=str(repo))
     except OSError:
         synced = 1
     if synced != 0:
-        print("uv sync 失敗。程式碼已更新，請在程式目錄手動執行：uv sync")
-        return 6
-    print("更新完成，請重新啟動 Vibe Launcher。")
-    return 0
+        return progress.finish("failed", tr("`uv sync` failed. The code is updated; run `uv sync` in the program folder by hand."), 6)
+    return progress.finish("done", tr("Update finished. Restart Vibe Launcher."), 0)
 
 
 def _default_data_root() -> Path:
@@ -487,7 +593,7 @@ def _default_data_root() -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m vibe_launcher.updates", description="Vibe Launcher 更新工具")
+    parser = argparse.ArgumentParser(prog="python -m vibe_launcher.updates", description="Vibe Launcher updater")
     commands = parser.add_subparsers(dest="command", required=True)
     release_command = commands.add_parser("apply-release")
     release_command.add_argument("--data", type=Path, default=None)
@@ -511,7 +617,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(check(repo, data, fetch=not args.no_fetch), ensure_ascii=False, indent=2))
         return 0
     if repo is None:
-        print("找不到 git checkout，無法自動更新。")
+        print(tr("No Git checkout was found, so it cannot update itself."))
         return 1
     return apply(repo, data)
 
