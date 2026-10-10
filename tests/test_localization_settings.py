@@ -230,7 +230,7 @@ def test_navigation_moves_between_inputs_without_sending_text(view, qtbot):
     edit.setFocus()
     nav = FocusNavigation(view)
     nav.start()
-    assert nav.active and nav.target is edit and nav.preview.isVisible()
+    assert nav.active and nav.target is edit and nav.overlay.isVisible()
     nav.move("up")
     assert nav.target is tab.terminal
     qtbot.keyClick(edit, Qt.Key.Key_Tab)
