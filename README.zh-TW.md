@@ -25,7 +25,7 @@
 | Python 3.11+ 與 [uv](https://docs.astral.sh/uv/) | 請用完整安裝的 Python，不要用其他軟體內嵌的版本。 |
 | Git | 從原始碼執行與 App 內更新需要。 |
 | Windows OpenSSH Client | 只有 SSH 環境需要（`ssh.exe`，Windows 選用功能）。 |
-| 要使用的官方 CLI | `codex`／`claude` 原生 `.exe` 需在 `PATH`（不執行 `.cmd`／`.bat` 包裝器）。 |
+| 要使用的官方 CLI | `codex`／`claude` 原生 `.exe` 需在 `PATH` 或下列使用者安裝目錄（不執行 `.cmd`／`.bat` 包裝器）。 |
 | 選用：Git + [GitHub CLI](https://cli.github.com/)（`gh`） | 只有專案綁定 GitHub 帳號時需要。 |
 
 **每台 Linux SSH 主機**
@@ -81,7 +81,7 @@ uv run vibe-launcher
 ## 3. 功能
 
 - **帳號隔離**：每個帳號獨立的 `CODEX_HOME`／`CLAUDE_CONFIG_DIR`；啟動時自動取得執行環境使用者的 skills、plugins 與對話，專案局部資料由 CLI 正常讀取，登入憑證維持隔離。
-- **本機與 SSH 環境**：狀態卡片（主機信任、驗證方式、agent、CLI 版本）、遠端資料夾瀏覽、可選的 SSH 密碼快取（Windows Credential Manager）、CLI 版本檢查與更新。
+- **本機與 SSH 環境**：狀態卡片（主機信任、驗證方式、agent、CLI 版本）、遠端資料夾瀏覽、可選的 SSH 密碼快取（Windows Credential Manager）、CLI 版本檢查與更新；Windows 在 PATH 後補查 `%USERPROFILE%/.local/bin` 與 `%LOCALAPPDATA%/Programs/OpenAI/Codex/bin`。自建 local 環境可在確認並通過相依性檢查後刪除，內建本機環境受保護。
 - **專案**：標籤與篩選（含依工作區篩選）、收藏、自訂專案圖示（內建圖示、圖片或可換色的 SVG）、顯示專案所屬的工作區、「開啟到工作區…」、依工作區分組列出專案所有工作階段的抽屜、重啟後的「可恢復」標示，以及一鍵還原（回到專案所在的工作區，tmux 工作重新接回、Codex／Claude 接續上次對話）。
 - **工作區**：xterm.js 終端，分頁或並排；原生輸入列方便輸入法（中文）輸入；每個專案的快速開啟；可命名的多專案桌面，每個工作區（含預設工作區）都有自己的名稱與圖示，切換工作區時保留終端與執行狀態；開關終端時自動保存工作區（強制關閉也不遺失，重啟後按「恢復 N 個終端」帶回，不會自動啟動）；每個終端有「重新載入」；重新載入與輸入列送出前可選擇是否確認；選擇 shell／CLI；文字可縮放。
 - **首頁**：執行中的工作、需要重新登入的帳號、每個工作區一張卡片（專案數、開啟與執行中的終端，點一下即切換）、最近專案（在工作區等待恢復的可直接「恢復」）與環境。

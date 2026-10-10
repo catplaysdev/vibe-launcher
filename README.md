@@ -26,7 +26,7 @@ let SSH work keep running in tmux after you close the window.
 | Python 3.11+ and [uv](https://docs.astral.sh/uv/) | Use a full Python install, not one embedded in another app. |
 | Git | Needed to run from a checkout and for in-app updates. |
 | Windows OpenSSH Client | Only for SSH environments (`ssh.exe`, an optional Windows feature). |
-| Official CLIs you plan to use | `codex` / `claude` as native `.exe` on `PATH` (`.cmd` / `.bat` wrappers are not run). |
+| Official CLIs you plan to use | Native `codex` / `claude` `.exe` on `PATH` or in the user install locations listed below (`.cmd` / `.bat` wrappers are not run). |
 | Optional: Git + [GitHub CLI](https://cli.github.com/) (`gh`) | Only for binding a GitHub account to a project. |
 
 **On each Linux SSH host**
@@ -90,7 +90,9 @@ size, `Ctrl+Shift+Space` keyboard navigation. All shortcuts can be changed in **
 - **Isolated accounts**: one `CODEX_HOME` / `CLAUDE_CONFIG_DIR` per account; automatically discover the execution
   environment's user skills, plugins and conversations on launch, with native project discovery and isolated credentials.
 - **Local and SSH environments**: status cards (host trust, auth mode, agent, CLI versions), remote folder browser,
-  optional SSH password caching in Windows Credential Manager, CLI version check and update.
+  optional SSH password caching in Windows Credential Manager, CLI version check and update. Windows also searches
+  `%USERPROFILE%/.local/bin` and `%LOCALAPPDATA%/Programs/OpenAI/Codex/bin` after PATH. Custom local environments can
+  be deleted after confirmation and dependency checks; the built-in local environment is protected.
 - **Projects**: tags and filters (including by workspace), favourites, custom project icons (glyph, picture or
   recoloured SVG), the workspaces a project is in, **Open in workspace…**, a drawer listing every session a project has
   grouped by workspace, a **Restorable** badge after a restart, and one-click **restore** (return to the project's
