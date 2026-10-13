@@ -70,6 +70,16 @@ def shipped_namespace(feature, monkeypatch, locale="en"):
     return module.__dict__
 
 
+def test_managed_helper_publishes_ordered_claude_events(tmp_path, monkeypatch):
+    namespace = shipped_namespace("managed", monkeypatch)
+    events = tmp_path / "events"
+    namespace["write_claude_event"](events, {"hook_event_name": "SubagentStart"})
+    namespace["write_claude_event"](events, {"hook_event_name": "Stop"})
+    recorded = [json.loads(path.read_text(encoding="utf-8"))["hook_event_name"]
+                for path in sorted(events.glob("*.json"))]
+    assert recorded == ["SubagentStart", "Stop"]
+
+
 @pytest.mark.parametrize("locale", i18n.LANGUAGES)
 @pytest.mark.parametrize("request_", [
     {"action": "launch", "account": CODEX, "path": "/home/user/" + "example/" * 40},

@@ -4360,6 +4360,55 @@ def claude_handoff_locked(events: Path) -> bool:
     return process_alive(owner) is not False
 
 
+def write_claude_event(events: Path, event: dict) -> None:
+    """Publish events in one host-local order, independent of clock precision or process IDs.
+
+    The OS releases the lock if a hook dies. Reserve the sequence before publishing: a failed write leaves a gap,
+    never an overwritten event. The consumer sees only the complete, atomically published JSON files.
+    """
+    import errno
+    private_dir(events)
+    lock = events.parent / "event-sequence.lock"
+    counter = events.parent / "event-sequence.json"
+    assert_private_paths((lock, counter))
+    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(descriptor, "r+b") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError("Invalid event sequence lock")
+        protect_path(lock)
+        if WINDOWS:
+            import msvcrt
+        else:
+            import fcntl
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                if WINDOWS:
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as error:
+                if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK) or time.monotonic() >= deadline:
+                    raise RuntimeError("Cannot reserve a Claude event sequence") from None
+                time.sleep(0.01)
+        try:
+            previous = json.loads(read_private(counter, limit=4096)).get("sequence")
+        except FileNotFoundError:
+            previous = 0
+        if type(previous) is not int or not 0 <= previous < 10 ** 20 - 1:
+            raise ValueError("Invalid Claude event sequence")
+        sequence = previous + 1
+        path = events / ("%020d.json" % sequence)
+        assert_private_path(path)
+        if path.exists():
+            raise ValueError("Claude event sequence would overwrite an event")
+        write_json(counter, {"sequence": sequence})
+        write_json(path, event)
+
+
 def claude_hook(args: list) -> int:
     """Hook and status line command of a managed Claude session. A work-starting event is recorded before the CLI may
     go on (exit 0); during a handoff, or when it cannot be recorded, it is blocked (exit 2). Other errors are swallowed."""
@@ -4381,9 +4430,9 @@ def claude_hook(args: list) -> int:
             folder = Path(os.environ["VIBE_CLAUDE_CONTROL"])
             # Record first, then look at the lock; the supervisor takes the lock, then reads the events. Whichever
             # comes second sees the other: the work is either known to the handoff or refused.
-            write_json(folder / ("%020d-%d.json" % (time.time_ns(), os.getpid())), event)
+            write_claude_event(folder, event)
             if (name or configured) in CLAUDE_GATED and claude_handoff_locked(folder):
-                write_json(folder / ("%020d-%d.json" % (time.time_ns(), os.getpid())),
+                write_claude_event(folder,
                            {"hook_event_name": "VibeRefused", "refused": name, "tool_use_id": event.get("tool_use_id"),
                             "generation": event["generation"]})
                 sys.stderr.write(tr("An account handoff is in progress; send this again in a moment.") + "\n")
@@ -4419,7 +4468,7 @@ def record_claude_status(data: dict, events: Path) -> None:
             return
     except (OSError, ValueError):
         pass
-    write_json(events / ("%020d-%d.json" % (time.time_ns(), os.getpid())),
+    write_claude_event(events,
                dict(seen, hook_event_name="VibeStatus", generation=generation))
     write_json(marker, seen)
 

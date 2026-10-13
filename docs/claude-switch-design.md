@@ -48,6 +48,11 @@ the user, so such a prompt simply stays on screen.
 
 ## Implementation outline
 
+Hook and status-line event files use a shared sequence allocated under an OS file lock. The sequence is reserved before
+the complete JSON event is published atomically; a hook crash can leave a gap but cannot reuse an event identifier.
+The consumer orders events by this sequence, independently of Windows wall-clock precision and writer process IDs.
+A sequence lock timeout or damaged sequence blocks work-starting hooks rather than silently losing their events.
+
 1. Launch managed Claude sessions with `--session-id`, `--model`, `--effort`, `--permission-mode` from the account or the
    previous session, and `--settings` carrying the launcher hooks and a wrapping status line.
 2. Hook and status-line commands call a new launcher helper (added through `selfcmd.HELPERS`, `entry.py` and the spec's

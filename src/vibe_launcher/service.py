@@ -53,7 +53,7 @@ MANAGED_ONLY = {"QuotaSelection", "_quota_timestamp", "quota_state", "select_quo
                 "instruction_sources_match", "observed_quota", "CodexQuotaMonitor", "ManagedCodexSession",
                 "thread_owner_active", "stop_process", "run_managed_codex", "CodexControlError", "ManagedCodexBridge", "CodexHandoffBlocked",
                 "codex_rule_differences", "align_codex_rules", "account_in_use", "_skill_inventory", "_enabled_plugins", "_callable_apps",
-                "claude_hook", "record_claude_quota", "record_claude_status", "_git_bash", "run_user_statusline", "claude_settings",
+                "claude_hook", "write_claude_event", "record_claude_quota", "record_claude_status", "_git_bash", "run_user_statusline", "claude_settings",
                 "claude_user_statusline", "managed_claude_supported",
                 "latest_claude_session", "_copy_private_tree", "copy_claude_session", "carry_claude_onboarding", "claude_profile_fingerprint",
                 "claude_capabilities", "ClaudeSupervisor", "ManagedClaudeSession", "run_managed_claude"}

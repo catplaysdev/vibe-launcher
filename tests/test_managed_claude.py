@@ -1,6 +1,7 @@
 """Managed Claude Code: hook events, quota from the status line, transcript handoff and the supervisor's safe point."""
 import io
 import json
+import subprocess
 import sys
 import time
 
@@ -154,8 +155,72 @@ def opened(item, session, model="claude-sonnet-5-5"):
 
 
 def emit(item, name, **values):
-    runtime.write_json(item._events / ("%020d-1.json" % time.time_ns()),
-                       dict(values, hook_event_name=name, generation=str(item._generation)))
+    runtime.write_claude_event(item._events, dict(values, hook_event_name=name, generation=str(item._generation)))
+
+
+def test_equal_clock_ticks_preserve_subagent_start_before_stop(supervisor, monkeypatch):
+    item, _ = supervisor
+    opened(item, item._session)
+    item.tick()
+    emit(item, "UserPromptSubmit")
+    item.tick()
+    monkeypatch.setattr(time, "time_ns", lambda: 1234567890000000)
+    emit(item, "SubagentStart", agent_id="still-running")
+    emit(item, "Stop", background_tasks=0)
+    assert len(list(item._events.glob("*.json"))) == 2
+    assert not item.tick()["can_switch"]
+    emit(item, "SubagentStop", agent_id="still-running")
+    assert item.tick()["can_switch"]
+
+
+def test_equal_clock_ticks_preserve_hook_and_status_events(tmp_path, monkeypatch):
+    events = tmp_path / "events"
+    monkeypatch.setattr(time, "time_ns", lambda: 1234567890000000)
+    common = dict(VIBE_CLAUDE_CONTROL=str(events), VIBE_CLAUDE_GENERATION="1")
+    hook(monkeypatch, "event", {"hook_event_name": "SubagentStart", "agent_id": "running"}, **common)
+    hook(monkeypatch, "event", {"hook_event_name": "Stop", "background_tasks": []}, **common)
+    hook(monkeypatch, "status", {"session_id": "session", "model": {"id": "example-model"}}, **common)
+    recorded = [json.loads(path.read_text(encoding="utf-8"))["hook_event_name"]
+                for path in sorted(events.glob("*.json"))]
+    assert recorded == ["SubagentStart", "Stop", "VibeStatus"]
+
+
+def test_event_sequence_is_shared_by_concurrent_hook_processes(tmp_path):
+    events = tmp_path / "events"
+    code = """import sys, time
+from pathlib import Path
+from vibe_launcher import runtime
+time.time_ns = lambda: 1234567890000000
+for index in range(5):
+    runtime.write_claude_event(Path(sys.argv[1]), {"writer": sys.argv[2], "index": index})
+"""
+    children = []
+    try:
+        for writer in range(4):
+            children.append(subprocess.Popen([sys.executable, "-c", code, str(events), str(writer)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE))
+        for child in children:
+            _, errors = child.communicate(timeout=30)
+            assert child.returncode == 0, errors.decode("utf-8", "replace")
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=10)
+    paths = sorted(events.glob("*.json"))
+    assert [int(path.stem) for path in paths] == list(range(1, 21))
+    records = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+    for writer in range(4):
+        assert [event["index"] for event in records if event["writer"] == str(writer)] == list(range(5))
+
+
+def test_invalid_event_sequence_blocks_new_work_without_overwriting(tmp_path, monkeypatch):
+    events = tmp_path / "events"
+    runtime.write_claude_event(events, {"hook_event_name": "Stop"})
+    original = next(events.glob("*.json")).read_bytes()
+    runtime.write_json(events.parent / "event-sequence.json", {"sequence": "invalid"})
+    assert run_hook(monkeypatch, events, "UserPromptSubmit") == 2
+    assert [path.read_bytes() for path in events.glob("*.json")] == [original]
 
 
 def test_safe_point_needs_a_settled_turn_without_tools_or_subagents(supervisor):

@@ -6,6 +6,7 @@
 
 ## [Unreleased]
 
+- 修正：Claude hook 與狀態列事件改以跨程序鎖保護的序號發布，不再因 Windows 時鐘刻度相同而覆蓋事件、遺失子代理狀態或使 CI 間歇失敗。
 - 新增：Codex 配額分類顯示、依環境區隔的帳號池與視覺管理流程，提供指定優先序、輪流分配及依可用額度策略。
 - 新增：Codex 終端改由 Launcher 管理的官方 app-server 執行，工具列可安全切換帳號（未設流程也可用）：只在驗證過的安全時點交接確切對話，保留模型、reasoning、權限、指示檔、skills 與 MCP 設定，未知工具結果不重播；額度失敗的工作在新帳號或可信重設後的同帳號自動接續，只通知模式不自動開始。
 - 新增：配額監測只在啟用流程的終端存續期間執行，同機同帳號共用快取與租約，失敗退避；重新載入、還原工作區或重開工作階段時沿用確切對話、最後帳號與流程。
@@ -39,6 +40,7 @@
 
 ### English
 
+- Fix: Claude hook and status-line events use a process-locked sequence instead of timestamps, preventing event loss, missing subagent state and intermittent CI failures on Windows with equal clock ticks.
 - New: separate Codex quota buckets, environment-specific account pools and a visual management flow with priority, round-robin and available-quota strategies.
 - New: Codex terminals run through a launcher-managed official app-server; the terminal toolbar can switch accounts safely (with or without a flow): the exact conversation is handed over only at a verified safe point, keeping model, reasoning, permissions, instructions, skills and MCP settings, and unknown tool outcomes are never replayed. A task that failed on quota continues on the new account, or on the same account after a trusted reset; notify-only never starts work.
 - New: quota monitoring runs only while a terminal with an enabled flow is open, shares one cache and lease per host and account, and backs off on failure; reloading a terminal, restoring a workspace or restarting a session keeps the exact conversation, last account and flow.
