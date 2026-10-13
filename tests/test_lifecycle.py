@@ -59,13 +59,15 @@ def test_ctrl_c_in_cli_does_not_abandon_supervisor(tmp_path, monkeypatch):
     assert runtime.run_worker(request, tmp_path, dict(__import__('os').environ)) == 0
 
 
-def test_bootstrap_deploys_equivalent_feature_source_with_integrity_check(tmp_path):
+@pytest.mark.parametrize("account", [sample(), dict(sample(), tool="claude"), dict(sample(), tool="claude", auth="api", model="m")])
+def test_bootstrap_deploys_equivalent_feature_source_with_integrity_check(tmp_path, account):
     import ast
     import base64
     import shlex
     import lzma
     import hashlib
-    request = {"action": "launch", "account": sample(), "path": "/home/me/a ' ; $(bad)"}
+    from vibe_launcher.service import _shipped_node, remote_feature
+    request = {"action": "launch", "account": account, "path": "/home/me/a ' ; $(bad)"}
     args = shlex.split(remote_command(request))
     tree = ast.parse(args[3])
     strings = [node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)]
@@ -75,12 +77,19 @@ def test_bootstrap_deploys_equivalent_feature_source_with_integrity_check(tmp_pa
             sources.append(lzma.decompress(base64.b85decode(value)))
         except Exception:
             pass
+    if len(args) == 5:
+        # The compact transport: the helper travels as its own argument, 14 bits per character.
+        codes = [ord(char) - 0x4E00 for char in args[4]]
+        raw = b"".join((codes[i] << 42 | codes[i + 1] << 28 | codes[i + 2] << 14 | codes[i + 3]).to_bytes(7, "big")
+                       for i in range(0, len(codes), 4))
+        size = next(node.upper.value for node in ast.walk(tree) if isinstance(node, ast.Slice)
+                    and isinstance(node.upper, ast.Constant))
+        sources.append(lzma.decompress(raw[:size]))
     assert len(sources) == 1
+    feature = remote_feature(request)
+    assert feature == ("managed" if runtime.switch_supported(account) else "cli")
     original = ast.parse(Path(runtime.__file__).read_bytes())
-    original.body = [node for node in original.body if not (
-        isinstance(node, (ast.FunctionDef, ast.ClassDef)) and
-        (node.name.startswith("harness_") or
-         (node.name.startswith("github_") and node.name not in SHARED_GITHUB)))]
+    original.body = [node for node in original.body if _shipped_node(node, feature)]
     # Omit documentation and type hints, as the transport does; all executable
     # statements and argument defaults in the selected feature must still match.
     for node in ast.walk(original):
@@ -98,9 +107,11 @@ def test_bootstrap_deploys_equivalent_feature_source_with_integrity_check(tmp_pa
     assert equivalent, "Transport changed executable statements or argument defaults"
     digest = hashlib.sha256(sources[0]).hexdigest()
     assert digest in strings
-    checks = [node for node in ast.walk(tree) if isinstance(node, ast.Assert)]
+    assert len(remote_command(request)) <= 28000
+    # A damaged helper exits with "not started" (78) before anything runs; not an assert, which -O would drop.
+    checks = [node for node in ast.walk(tree) if isinstance(node, ast.IfExp)]
     assert len(checks) == 1
-    assert ast.unparse(checks[0]) == f"assert hashlib.sha256(b).hexdigest() == '{digest}'"
+    assert ast.unparse(checks[0]) == f"sys.exit(78) if hashlib.sha256(b).hexdigest() != '{digest}' else None"
     assert any("runtime-" + digest + ".py" == value for value in strings)
     assert request["path"] not in args[3]
 
@@ -132,12 +143,12 @@ def test_remote_tmux_snapshot_does_not_contain_api_key(tmp_path, monkeypatch):
     calls = []
     def fake_tmux(*args, **kwargs):
         calls.append(args)
-        return subprocess.CompletedProcess(args, 0)
+        return subprocess.CompletedProcess(args, 0, b"@1\n" if args[0] in {"new-window", "new-session"} else b"", b"")
     monkeypatch.setattr(runtime, "tmux", fake_tmux)
     request = {"action": "launch", "account": sample(), "session_id": "s", "environment_id": "host", "path": str(tmp_path)}
     runtime.perform(request, tmp_path / "state")
-    assert calls[0][:4] == ("new-session", "-d", "-s", "vibe-s")
-    assert calls[0][5] == str(tmp_path.resolve())
+    assert calls[0][:3] == ("new-window", "-t", "=vibe-ws-default:")
+    assert calls[0][calls[0].index("-c") + 1] == str(tmp_path.resolve())
     snapshot = runtime.session_path(tmp_path / "state", "s").read_text(encoding="utf-8")
     assert "fake-secret" not in snapshot
     assert "fake-secret" not in str(calls)

@@ -1363,6 +1363,19 @@ class ActionMenu(QFrame):
         if pos.y() + size.height() > area.bottom():
             pos.setY(anchor.mapToGlobal(QPoint(0, 0)).y() - size.height() + 6)
         pos.setX(max(area.left() + 4, min(pos.x(), area.right() - size.width() - 4)))
+        self._open_at(pos)
+
+    def popup_at(self, point: QPoint) -> None:
+        """A right-click menu: opens at the pointer, kept on the screen."""
+        self.adjustSize()
+        size = self.sizeHint()
+        screen = QGuiApplication.screenAt(point) or QGuiApplication.primaryScreen()
+        area = screen.availableGeometry()
+        x = min(point.x(), area.right() - size.width() - 4)
+        y = point.y() if point.y() + size.height() <= area.bottom() else point.y() - size.height()
+        self._open_at(QPoint(max(area.left() + 4, x), max(area.top() + 4, y)))
+
+    def _open_at(self, pos: QPoint) -> None:
         self.move(pos)
         self.show()
         for item in self.items:

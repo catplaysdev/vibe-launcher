@@ -8,6 +8,7 @@ class FakeService:
         self.calls = []
 
     def start(self, action, **kwargs):
+        kwargs.pop("workspace_id", None)      # which tmux session a launch joins is tested in test_workspace
         self.calls.append((action, kwargs))
 
 
@@ -47,7 +48,8 @@ def test_auth_status_preserves_selection(window):
     store.save("auth_states", {"id": account["id"] + ":local", "status": "authenticated",
                                "checked_at": "2026-10-04T00:00:00+00:00"})
     view._poll()
-    assert "已登入" in view.accounts_page.lists["codex"].currentItem().text()
+    listing = next(found for key, found in view.accounts_page.lists.items() if key.startswith("codex/"))
+    assert "已登入" in listing.currentItem().text()
     assert view.accounts_page.current_selection == ("accounts", account["id"])
 
 

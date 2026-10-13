@@ -41,6 +41,7 @@ class FakeService:
         self.calls = []
 
     def start(self, action, **kwargs):
+        kwargs.pop("workspace_id", None)      # which tmux session a launch joins is tested in test_workspace
         self.calls.append((action, kwargs))
 
 

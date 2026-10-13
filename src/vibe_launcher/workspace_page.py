@@ -42,7 +42,7 @@ TOOL_LABEL = {"codex": "Codex", "claude": "Claude", "shell": tr("Terminal")}
 # One-shot jobs that report their result elsewhere (a dialog, the environment cards, a toast). A clean exit closes
 # their terminal; a failure keeps it so the output can be read.
 BACKGROUND_ACTIONS = {"github", "harness", "import-settings", "import-history", "doctor", "ssh-settings", "check-tools",
-                      "refresh", "stop", "quota"}
+                      "refresh", "stop", "quota", "codex-control"}
 WORKSPACE_GLYPH = "briefcase"          # a desktop's icon until the user picks one
 DEFAULT_ICON_KEY = "@default"          # icon key of the unsaved default desktop (saved ids never contain "@")
 
@@ -69,6 +69,7 @@ class TabInfo:
     action: str = ""
     terminal_profile: str = ""
     workspace_id: str = ""
+    resume_thread_id: str = ""
 
     @property
     def background(self) -> bool:
@@ -109,6 +110,8 @@ class TerminalPane(QFrame):
     reopen_requested = Signal(str)
     reload_requested = Signal(str)
     history_requested = Signal(str)
+    quota_policy_requested = Signal(str, object)
+    account_switch_requested = Signal(str, object)
     chord = Signal(str)
 
     def __init__(self, info: TabInfo, terminal: QWidget, parent: QWidget | None = None):
@@ -136,6 +139,11 @@ class TerminalPane(QFrame):
         self.composer_button = IconButton("keyboard", tr('workspace_page.24d0f3982154'),
                                           size=28, icon_size=15)
         self.switch_button = IconButton("repeat", tr('workspace_page.1a798a19e491'), size=28, icon_size=15)
+        self.quota_button = IconButton("settings", tr("Quota plan"), size=28, icon_size=15)
+        self.account_button = IconButton("user", tr("Switch this terminal's account safely"), size=28, icon_size=15)
+        quota_capable = info.tool in {"codex", "claude"} and info.kind in {"agent", "attach"} and bool(info.session_id)
+        self.quota_button.setVisible(quota_capable)
+        self.account_button.setVisible(quota_capable)
         self.history_button = IconButton("download", tr("Refresh conversations from this environment"), size=28, icon_size=15)
         self.reload_button = IconButton("refresh", tr("Reload this terminal"), size=28, icon_size=15)
         self.reload_button.setVisible(bool(info.preset_id) and info.kind in {"agent", "shell", "attach"})
@@ -143,12 +151,16 @@ class TerminalPane(QFrame):
         self.detach_button = IconButton("log-out", tr('workspace_page.c1212c4f9120'), size=28, icon_size=15)
         self.close_button = IconButton("x", tr('workspace_page.04b383781c02'), size=28, icon_size=15)
         self.refresh_shortcut_labels()
-        for button in (self.composer_button, self.switch_button, self.reload_button, self.history_button, self.detach_button,
+        for button in (self.composer_button, self.switch_button, self.quota_button, self.account_button, self.reload_button, self.history_button, self.detach_button,
                        self.close_button):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             row.addWidget(button)
+        self.quota_button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.account_button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.composer_button.clicked.connect(lambda: self.set_composer_visible(not self.composer_visible(), focus=True))
         self.switch_button.clicked.connect(lambda: self.switch_requested.emit(info.id, self.switch_button))
+        self.quota_button.clicked.connect(lambda: self.quota_policy_requested.emit(info.id, self.quota_button))
+        self.account_button.clicked.connect(lambda: self.account_switch_requested.emit(info.id, self.account_button))
         self.history_button.clicked.connect(lambda: self.history_requested.emit(info.id))
         self.reload_button.clicked.connect(lambda: self.reload_requested.emit(info.id))
         self.detach_button.clicked.connect(lambda: self.detach_requested.emit(info.id))
@@ -593,6 +605,8 @@ class ProjectLauncher(QWidget):
 
 
 class WorkspacePage(QWidget):
+    quota_policy_requested = Signal(str, object)
+    account_switch_requested = Signal(str, object)
     launch_requested = Signal(str, str, str, str)   # preset_id, kind, account_id, environment_id
     history_refresh_requested = Signal(str, str, str)   # preset_id, account_id, environment_id
     palette_requested = Signal()
@@ -878,6 +892,8 @@ class WorkspacePage(QWidget):
         pane.detach_requested.connect(self.detach)
         pane.close_requested.connect(self.close_tab)
         pane.switch_requested.connect(self._switch_menu)
+        pane.quota_policy_requested.connect(self.quota_policy_requested)
+        pane.account_switch_requested.connect(self.account_switch_requested)
         pane.reopen_requested.connect(self._reopen)
         pane.reload_requested.connect(self.reload_tab)
         pane.composer.edit.confirm = lambda text, i=info.id: self._confirm_send(i, text)
@@ -1407,6 +1423,8 @@ class WorkspacePage(QWidget):
                 slot = {"preset_id": tab.info.preset_id, "kind": kind}
                 if kind == "agent" and tab.info.account_id:
                     slot["account_id"] = tab.info.account_id
+                if kind == "agent" and tab.info.tool in {"codex", "claude"} and tab.info.session_id:
+                    slot["session_id"] = tab.info.session_id      # its exact conversation and flow come back with it
                 if tab.info.environment_id:
                     slot["environment_id"] = tab.info.environment_id
                 if kind == "shell" and tab.info.terminal_profile:

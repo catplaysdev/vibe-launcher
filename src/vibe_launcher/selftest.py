@@ -57,9 +57,17 @@ def run() -> dict:
         window = MainWindow(store, LauncherService(store))
         checks["window"] = bool(window.windowTitle())
         checks["gpu_primer"] = getattr(window, "_gpu_primer", None) is not None or not checks["terminal_available"]
+        # The browser engine (about 200 MB of code) waits for the first terminal; it must still load from this build.
+        checks["engine_deferred"] = "PySide6.QtWebEngineCore" not in sys.modules
         window.workspace.shutdown()
         window.deleteLater()
     app.processEvents()
+    try:
+        import PySide6.QtWebChannel  # noqa: F401
+        import PySide6.QtWebEngineWidgets  # noqa: F401
+        checks["terminal_engine"] = True
+    except ImportError:
+        checks["terminal_engine"] = False
     checks["ok"] = all(v for k, v in checks.items() if k not in {"version", "frozen"})
     return checks
 

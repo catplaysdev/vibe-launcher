@@ -92,14 +92,16 @@ _webengine_ok: bool | None = None
 
 
 def available() -> bool:
-    """Can this machine host a built-in terminal? (ConPTY + QtWebEngine)"""
+    """Can this machine host a built-in terminal? (ConPTY + QtWebEngine)
+
+    Only looks the modules up: importing them maps the browser engine (Qt6WebEngineCore, about 200 MB of code) into
+    the process, which then waits for the first terminal. If loading fails then, the job opens in a console window."""
     global _webengine_ok
     if _webengine_ok is None:
+        from importlib.util import find_spec
         try:
-            import PySide6.QtWebChannel  # noqa: F401
-            import PySide6.QtWebEngineWidgets  # noqa: F401
-            _webengine_ok = True
-        except ImportError:
+            _webengine_ok = all(find_spec(name) is not None for name in ("PySide6.QtWebChannel", "PySide6.QtWebEngineWidgets"))
+        except (ImportError, ValueError):
             _webengine_ok = False
     return _webengine_ok and conpty.available()
 

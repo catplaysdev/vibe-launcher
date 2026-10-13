@@ -62,6 +62,44 @@ def test_summary_survives_missing_or_odd_fields():
     assert [w["used_percent"] for w in odd["windows"]] == [100]
 
 
+@pytest.mark.parametrize("used", [None, True, False, "25", float("nan"), float("inf"), -float("inf")])
+def test_summary_unknown_usage_is_not_available_capacity(used):
+    summary = runtime.quota_summary({"rateLimits": {"primary": {"usedPercent": used}}})
+    assert summary["windows"] == []
+    assert summary["buckets"]["codex"]["windows"] == []
+    json.dumps(summary, allow_nan=False)
+
+
+@pytest.mark.parametrize("value", [True, False, -1, 0, "300", 3.5])
+def test_summary_rejects_invalid_window_duration_and_reset(value):
+    summary = runtime.quota_summary({"rateLimits": {"primary": {
+        "usedPercent": 25, "windowDurationMins": value, "resetsAt": value}}})
+    assert summary["windows"][0]["window_minutes"] is None
+    assert summary["windows"][0]["resets_at"] is None
+
+
+def test_summary_preserves_separate_buckets_without_mixing_legacy_windows():
+    summary = runtime.quota_summary({**SAMPLE, "rateLimitsByLimitId": {
+        "codex": {"primary": {"usedPercent": 90, "windowDurationMins": 300}},
+        "review": {"limitName": "Code review", "secondary": {"usedPercent": 20},
+                   "rateLimitReachedType": "weekly", "accountId": "never-shown"},
+        "unknown": {}, "bad": None}})
+    assert set(summary["buckets"]) == {"codex", "review", "unknown"}
+    assert summary["buckets"]["codex"]["windows"][0]["used_percent"] == 90
+    assert summary["buckets"]["review"]["windows"][0]["used_percent"] == 20
+    assert summary["buckets"]["review"]["name"] == "Code review"
+    assert summary["buckets"]["review"]["reached"] == "weekly"
+    assert summary["buckets"]["unknown"]["windows"] == []
+    assert summary["windows"][0]["used_percent"] == 11
+    assert "never-shown" not in json.dumps(summary)
+
+
+def test_summary_legacy_snapshot_still_provides_a_bucket():
+    summary = runtime.quota_summary(SAMPLE)
+    assert summary["buckets"]["codex"]["windows"] == summary["windows"]
+    assert runtime.quota_summary({})["buckets"] == {}
+
+
 def test_rpc_returns_the_answer_even_when_the_server_sends_its_own_requests(server):
     result = runtime.rpc_rate_limits([sys.executable, str(server), "ok", json.dumps(SAMPLE)], {}, timeout=20)
     assert result["rateLimits"]["primary"]["usedPercent"] == 11
@@ -150,6 +188,38 @@ def select(view, account_id):
 
 def texts(panel):
     return " | ".join(label.text() for label in panel.findChildren(QLabel))
+
+
+def test_multi_bucket_panel_keeps_limits_separate_and_omits_legacy_duplicate(qtbot):
+    panel = qp.QuotaPanel()
+    qtbot.addWidget(panel)
+    report = runtime.quota_summary({**SAMPLE, "rateLimitsByLimitId": {
+        "codex": {"primary": {"usedPercent": 90, "windowDurationMins": 300}},
+        "review": {"limitName": "Code review", "secondary": {"usedPercent": 20}},
+        "unknown": {"limitName": "<b>Unknown</b>"}}})
+    panel.show_account({"id": "a", "tool": "codex", "auth": "subscription"},
+                       [{"id": "local", "name": "Local"}], report)
+    shown = texts(panel)
+    assert "codex" in shown and "Code review (review)" in shown
+    assert "已用 90%" in shown and "已用 20%" in shown
+    assert "已用 11%" not in shown and "已用 54%" not in shown
+    assert len(panel.findChildren(qp.UsageBar)) == 2
+    assert all(bar.accessibleName().startswith(prefix) for bar, prefix in
+               zip(panel.findChildren(qp.UsageBar), ("codex:", "Code review (review):")))
+    heading = next(item for item in panel.findChildren(QLabel) if "<b>Unknown</b>" in item.text())
+    assert heading.textFormat() == qp.Qt.TextFormat.PlainText
+    panel.resize(640, panel.sizeHint().height())
+    assert not panel.grab().isNull()
+
+
+def test_legacy_cached_report_without_buckets_still_renders(qtbot):
+    panel = qp.QuotaPanel()
+    qtbot.addWidget(panel)
+    report = runtime.quota_summary(SAMPLE)
+    report.pop("buckets")
+    panel.show_account({"id": "a", "tool": "codex", "auth": "subscription"},
+                       [{"id": "local", "name": "Local"}], report)
+    assert "已用 11%" in texts(panel) and "已用 54%" in texts(panel)
 
 
 def test_api_accounts_show_no_quota_at_all(view):

@@ -35,7 +35,7 @@ analysis = Analysis(
     pathex=[str(ROOT / "src")],
     datas=datas,
     # Helpers are imported by name in entry.py, which static analysis cannot follow.
-    hiddenimports=["vibe_launcher.runner", "vibe_launcher.updates", "vibe_launcher.askpass"],
+    hiddenimports=["vibe_launcher.runner", "vibe_launcher.updates", "vibe_launcher.askpass", "vibe_launcher.claude_hook"],
     excludes=["tkinter", "unittest", "pytest", "test", "distutils", "setuptools", "pip",
               "PySide6.Qt3DCore", "PySide6.QtCharts", "PySide6.QtDataVisualization", "PySide6.QtMultimedia",
               "PySide6.QtSql", "PySide6.QtTest", "PySide6.QtBluetooth", "PySide6.QtSensors", "PySide6.QtPdf"],
@@ -59,6 +59,10 @@ def wanted(name: str) -> bool:
         return False                      # QML modules: the launcher only creates an empty Quick widget, never loads QML
     if re.search(r"(^|/)Qt6(3D\w*|Quick3D\w*|Graphs\w*|Charts\w*|Location\w*|Pdf\w*|Multimedia\w*|DataVisualization\w*|Sql|Bluetooth|Sensors|Nfc|SerialPort|TextToSpeech)\.dll$", path):
         return False                      # modules the launcher does not import
+    if re.search(r"(^|/)icu(uc|in|dt)\d*\.dll$", path, re.IGNORECASE):
+        # Qt on Windows uses the system ICU (System32\icuuc.dll, plain C exports). PyInstaller can pick up another
+        # program's ICU from PATH instead (LibreOffice ships a versioned ICU 78): QtCore then fails to load (error 127).
+        return False
     return True
 
 

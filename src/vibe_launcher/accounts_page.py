@@ -18,6 +18,7 @@ from .theme import R, S, TOOL_ICONS, section_hue, tool_hue
 
 TOOLS = (("codex", "Codex"), ("claude", "Claude"),
          ("deepseek-harness", tr('accounts_page.17133d073aed')), ("github", "GitHub"))
+VISIBLE_ROWS = 4        # an environment plate shows this many accounts, then scrolls
 STATUS = {"authenticated": tr('accounts_page.c42a66e27201'), "configured": tr('accounts_page.40857ec8a467'), "failed": tr('accounts_page.82f6be16f3b4'),
           "unavailable": tr('accounts_page.ee95db46cf38'), "unknown": tr('accounts_page.ee95db46cf38'), "logged_out": tr('accounts_page.4e852fca0381')}
 
@@ -36,7 +37,8 @@ class AccountsPage(QWidget):
         self._selection = ("", "")
         self._columns = 0
         self.plates: dict[str, QFrame] = {}
-        self.lists: dict[str, QListWidget] = {}
+        self.lists: dict[str, QListWidget] = {}         # "<tool>/<environment id>" -> its accounts
+        self.context_requested = None                  # set by the window: (kind, record_id, global position)
         root = QVBoxLayout(self)
         root.setContentsMargins(S.lg, S.lg, S.lg, S.lg)
         root.setSpacing(S.md)
@@ -126,9 +128,12 @@ class AccountsPage(QWidget):
         if self._selection != previous:
             self.selected.emit(*self._selection)
 
-    def _row_text(self, account: dict) -> str:
+    def _environment_name(self, env_id: str) -> str:
+        return self._environments.get(env_id, env_id or tr('accounts_page.2d1afa1675e1'))
+
+    def _row_text(self, account: dict, with_environment: bool = True) -> str:
         env_id = account.get("environment_id", "")
-        env = self._environments.get(env_id, env_id or tr('accounts_page.2d1afa1675e1'))
+        env = self._environment_name(env_id)
         if account.get("tool") == "github":
             status = STATUS.get(account.get("status", "unknown"), tr('accounts_page.ee95db46cf38'))
             identity = account.get("login") or tr('accounts_page.9c24e74a1b6f')
@@ -142,7 +147,8 @@ class AccountsPage(QWidget):
                 state = next((value for key, value in self._states.items() if key.startswith(account['id'] + ':')), None)
             status = STATUS.get(state or "unknown", tr('accounts_page.ee95db46cf38'))
             identity = ""
-        return "\n".join(filter(None, [account.get("name") or tr('accounts_page.67bee6acfc3c'), f"{status} · {env}", identity]))
+        return "\n".join(filter(None, [account.get("name") or tr('accounts_page.67bee6acfc3c'),
+                                       f"{status} · {env}" if with_environment else status, identity]))
 
     def _render(self, *_args) -> None:
         query = self.search.text().strip().casefold()
@@ -173,28 +179,14 @@ class AccountsPage(QWidget):
             heading.setProperty("role", "section")
             head.addWidget(heading, 1)
             layout.addLayout(head)
-            listing = QListWidget()
-            listing.setAccessibleName(tr('accounts_page.d3f30c3ed64f', v0=f'{title}'))
-            listing.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            listing.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            listing.setWordWrap(True)
-            listing.setMinimumWidth(0)
-            listing.installEventFilter(self)
-            total = 2 * listing.frameWidth()
+            by_environment: dict[str, list[dict]] = {}
             for account in group:
-                item = QListWidgetItem(self._row_text(account))
-                item.setData(Qt.ItemDataRole.UserRole, (account["_kind"], account["id"]))
-                item.setToolTip(item.text())
-                height = 82 if item.text().count("\n") == 2 else 62
-                item.setSizeHint(QSize(0, height))
-                listing.addItem(item)
-                total += height
-            listing.setFixedHeight(total)
-            listing.currentItemChanged.connect(self._selected_item)
-            listing.itemDoubleClicked.connect(lambda item: self.action_requested.emit("edit", *item.data(Qt.ItemDataRole.UserRole)))
-            layout.addWidget(listing)
+                by_environment.setdefault(account.get("environment_id") or "", []).append(account)
+            # This PC first, then servers by name; accounts usable anywhere (API keys) last.
+            order = sorted(by_environment, key=lambda env_id: (env_id == "", env_id != "local", self._environment_name(env_id).casefold()))
+            for env_id in order:
+                layout.addWidget(self._environment_plate(tool, title, env_id, by_environment[env_id]))
             self.plates[tool] = plate
-            self.lists[tool] = listing
         self.empty.setVisible(not self.plates)
         self.empty.setText(tr('accounts_page.6ea3333e5ab2') if self._records else tr('accounts_page.23fa9718b35c'))
         self._columns = 0
@@ -206,6 +198,50 @@ class AccountsPage(QWidget):
             if had_selection:
                 self.selected.emit("", "")
         self._sync_selection()
+
+    def _environment_plate(self, tool: str, title: str, env_id: str, accounts: list[dict]) -> QFrame:
+        plate = QFrame()
+        plate.setProperty("surface", "well")
+        layout = QVBoxLayout(plate)
+        layout.setContentsMargins(S.sm, S.sm, S.sm, S.sm)
+        layout.setSpacing(S.xs)
+        name = self._environment_name(env_id)
+        heading = QLabel(f"{name}  ·  {len(accounts)}")
+        heading.setProperty("role", "subsection")
+        layout.addWidget(heading)
+        listing = QListWidget()
+        listing.setAccessibleName(tr('accounts_page.d3f30c3ed64f', v0=f'{title} · {name}'))
+        listing.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        listing.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        listing.setWordWrap(True)
+        listing.setMinimumWidth(0)
+        listing.installEventFilter(self)
+        listing.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        listing.customContextMenuRequested.connect(lambda pos, listing=listing: self._context_menu(listing, pos))
+        heights = []
+        for account in accounts:
+            item = QListWidgetItem(self._row_text(account, with_environment=False))
+            item.setData(Qt.ItemDataRole.UserRole, (account["_kind"], account["id"]))
+            item.setToolTip(self._row_text(account))
+            height = 82 if item.text().count("\n") >= 2 else 62
+            item.setSizeHint(QSize(0, height))
+            listing.addItem(item)
+            heights.append(height)
+        # The theme pads the list by S.xs and spaces rows by a 2px margin above and below each.
+        listing.setFixedHeight(2 * listing.frameWidth() + 2 * S.xs + sum(height + 4 for height in heights[:VISIBLE_ROWS]))
+        listing.currentItemChanged.connect(self._selected_item)
+        listing.itemDoubleClicked.connect(lambda item: self.action_requested.emit("edit", *item.data(Qt.ItemDataRole.UserRole)))
+        layout.addWidget(listing)
+        self.lists[f"{tool}/{env_id}"] = listing
+        return plate
+
+    def _context_menu(self, listing: QListWidget, pos) -> None:
+        item = listing.itemAt(pos)
+        if item is None:
+            return
+        self.select(*item.data(Qt.ItemDataRole.UserRole))
+        if self.context_requested:
+            self.context_requested(*self._selection, listing.viewport().mapToGlobal(pos))
 
     def _selected_item(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
         if current is None:
