@@ -113,3 +113,33 @@ def test_failed_login_does_not_start_cli(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="Login incomplete"):
         runtime.authenticate({"account": account()}, tmp_path)
     assert events[-1]["auth_status"] == "unknown"
+
+
+def test_tmux_attaches_as_utf8_and_keeps_c_locale_only_for_parsed_output(monkeypatch):
+    import subprocess
+    from vibe_launcher import runtime
+    calls = []
+    monkeypatch.setattr(runtime, "trusted_executable", lambda name: "/usr/bin/tmux")
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: calls.append((argv, kwargs["env"])) or subprocess.CompletedProcess(argv, 0))
+    runtime.tmux("attach-session", "-t", "x")
+    runtime.tmux("has-session", "-t", "x", capture=True)
+    assert calls[0][0][:2] == ["/usr/bin/tmux", "-u"] and calls[0][1].get("LC_ALL") != "C"
+    assert calls[1][1]["LC_ALL"] == "C"
+
+
+@pytest.mark.parametrize("env, expected", [
+    ({}, ["-u", "LC_ALL", "LC_CTYPE=C.UTF-8"]),
+    ({"LANG": "en_US.UTF-8"}, ["-u", "LC_ALL"]),
+    ({"LC_ALL": "zh_TW.utf8"}, []),
+    ({"LC_ALL": "C"}, ["LC_CTYPE=C.UTF-8"]),
+])
+def test_tmux_worker_gets_a_utf8_locale(env, expected):
+    from vibe_launcher import runtime
+    assert runtime.utf8_locale(env) == expected
+
+
+def test_a_tmux_worker_prints_no_events_into_the_window_the_user_sees(capsys):
+    runtime.emit({"action": "worker", "nonce": "n"}, {"status": "running"})
+    assert capsys.readouterr().out == ""
+    runtime.emit({"action": "list-sessions", "nonce": "n"}, {"status": "running"})
+    assert "VIBE_EVENT_n:" in capsys.readouterr().out

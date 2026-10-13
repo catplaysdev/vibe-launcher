@@ -131,3 +131,46 @@ def test_outcome_codes_are_ignored_for_other_actions(tmp_path, monkeypatch):
     fake_ssh(monkeypatch, runtime.EXIT_SESSION_ENDED)
     runner.run_remote(store, request, env)
     assert store.get("sessions", "s")["status"] == "unknown"
+
+
+@pytest.mark.parametrize("action, piped", [("launch", False), ("attach", False), ("list-sessions", True), ("login", True)])
+def test_a_terminal_session_gives_ssh_the_terminal_itself(tmp_path, monkeypatch, action, piped):
+    # Windows ssh reads the window size from its stdout console; through a pipe the server's pty stays 80x24.
+    store, env, request = setup(tmp_path)
+    request["action"] = action
+    seen = []
+    monkeypatch.setattr(askpass, "ssh_environment", lambda *a: None)
+    monkeypatch.setattr(runner, "ssh_args", lambda *a, **k: ["fake-ssh"])
+
+    class Remote:
+        stdout = io.BytesIO(b"")
+
+        def __init__(self, *args, **kwargs):
+            seen.append(kwargs.get("stdout"))
+
+        def wait(self):
+            return 0
+    monkeypatch.setattr(runner.subprocess, "Popen", Remote)
+    runner.run_remote(store, request, env)
+    assert seen == [subprocess.PIPE if piped else None]
+
+
+@pytest.mark.parametrize("code, promoted", [(runtime.EXIT_SESSION_DETACHED, True), (runtime.EXIT_NOT_STARTED, True),
+                                            (runner.SSH_FAILED, False)])
+def test_a_terminal_session_keeps_a_new_password_only_after_the_server_answered(tmp_path, monkeypatch, code, promoted):
+    store, env, request = setup(tmp_path)
+    calls = []
+    monkeypatch.setattr(askpass, "ssh_environment", lambda *a: {"VIBE_SSH_ROOT": str(tmp_path), "VIBE_SSH_ATTEMPT": "x"})
+    monkeypatch.setattr(askpass, "password_operation", lambda *a, **k: calls.append(k))
+    monkeypatch.setattr(askpass, "cleanup", lambda *a: None)
+    monkeypatch.setattr(askpass, "was_cancelled", lambda *a: False)
+    monkeypatch.setattr(runner, "ssh_args", lambda *a, **k: ["fake-ssh"])
+
+    class Remote:
+        stdout = None
+
+        def wait(self):
+            return code
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **k: Remote())
+    runner.run_remote(store, request, env)
+    assert calls == ([{"promote": True}] if promoted else [])

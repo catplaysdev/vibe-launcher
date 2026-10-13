@@ -32,20 +32,22 @@ def test_executable_symlink_keeps_dispatch_name(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("exists", [True, False])
-def test_stop_missing_snapshot_checks_exact_tmux_session(tmp_path, monkeypatch, exists):
+def test_stop_missing_snapshot_checks_exact_tmux_window(tmp_path, monkeypatch, exists):
     monkeypatch.setattr(runtime, "WINDOWS", False)
     calls = []
     def fake_tmux(*args, **kwargs):
         calls.append(args)
-        if args[0] == "has-session":
-            return subprocess.CompletedProcess(args, 0 if exists else 1, b"", b"can't find session: vibe-s\n")
+        if args[0] == "list-windows":
+            # "s2" must not be mistaken for "s"
+            return subprocess.CompletedProcess(args, 0, b"@4 s2\n" + (b"@7 s\n" if exists else b""), b"")
         return subprocess.CompletedProcess(args, 0)
     monkeypatch.setattr(runtime, "tmux", fake_tmux)
     monkeypatch.setattr(runtime, "emit", lambda *a: None)
     request = {"action": "stop", "session_id": "s", "environment_id": "host"}
     assert runtime.perform(request, tmp_path) == 0
-    assert calls[0] == ("has-session", "-t", "=vibe-s")
-    assert (("kill-session", "-t", "=vibe-s") in calls) is exists
+    assert calls[0][0] == "list-windows"
+    assert (("kill-window", "-t", "@7") in calls) is exists
+    assert not any(c[0] == "kill-window" and c[-1] == "@4" for c in calls)
 
 
 def test_tmux_permission_error_is_not_treated_as_stopped(tmp_path, monkeypatch):

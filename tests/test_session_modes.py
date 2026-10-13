@@ -139,7 +139,7 @@ def test_refresh_uses_the_cli_pid_for_sessions_started_without_tmux(tmp_path, mo
 def test_refresh_still_uses_tmux_for_keep_alive_sessions(tmp_path, monkeypatch):
     root = remote(monkeypatch, tmp_path)
     runtime.write_json(runtime.session_path(root, "k"), {"session_id": "k", "environment_id": "host", "status": "detached"})
-    monkeypatch.setattr(runtime, "tmux", lambda *a, **k: subprocess.CompletedProcess(a, 0))
+    monkeypatch.setattr(runtime, "tmux", lambda *a, **k: subprocess.CompletedProcess(a, 0, b"@3 k\n", b""))
     assert refresh(root, monkeypatch) == {"k": "running"}
 
 

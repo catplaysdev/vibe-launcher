@@ -103,12 +103,23 @@ size, `Ctrl+Shift+Space` keyboard navigation. All shortcuts can be changed in **
   close loses nothing; **Restore N terminals** brings them back after a restart, never automatically), a **Reload**
   button per terminal, optional confirmation before reloading or sending from the input bar, shell / CLI profile
   choice, zoomable text.
+- **Accounts and right-click**: each tool's accounts are grouped by environment (this PC first, then servers), and a
+  long environment list scrolls; right-clicking a project, account, environment or session offers the same actions
+  as its buttons. On a server, each workspace runs in one tmux session named after the workspace id; deleting the
+  workspace says so and ends that session.
 - **Home**: what is running, accounts that need signing in, a card per workspace (projects, open and running
   terminals; click to switch), recent projects (with **Restore** for the ones waiting in a workspace) and environments.
 - **Sessions**: every run with its real status (from the remote supervisor's exit code, not terminal output); bulk
   stop / clean-up, grouped as workspace › project › terminal, or listed by time.
 - **Integrations**: GitHub account and commit identity per project (official `gh`), Codex quota view,
   DeepSeek Harness Web (experimental).
+- **Quota plans**: separate usage buckets, environment-specific account pools and saved plans built from blocks
+  (three templates: take over in order, rotate accounts, most quota first; conditions, waits and notifications wired
+  with the mouse or keyboard, checked before saving, previewed without starting work). Terminals have no plan until
+  one is applied. A Codex terminal can switch accounts from its toolbar: the
+  exact conversation and its settings move at a verified safe point, and a task stopped by quota continues. Verified
+  with real local accounts; Claude Code terminals switch the same way by resuming the exact conversation. SSH hosts are not yet
+  verified. See the [guide](docs/guide.zh-TW.md) and the [issue table](docs/account-switching-issues.zh-TW.md).
 - **Customisation**: 8 colour themes and accent colours, separate interface and terminal fonts, interface scale (80–200%), English / 繁體中文 / 简体中文 / 日本語 / 한국어 / Deutsch / Español UI,
   CLI plugin manifests in `settings.json`.
 - **Safe updates**: the installed app updates from GitHub Releases (checksum verified); a git checkout compares tags

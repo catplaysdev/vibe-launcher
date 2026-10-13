@@ -8,13 +8,14 @@ command line anywhere else, and never read package files through ``__file__`` of
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 GUI_NAME = "Vibe Launcher.exe"
 CLI_NAME = "vibe-launcher-cli.exe"
 # Helper programs ``entry.py`` can run; each is ``vibe_launcher.<name>`` with a ``main()`` that reads ``sys.argv``.
-HELPERS = ("runner", "updates", "askpass")
+HELPERS = ("runner", "updates", "askpass", "claude_hook")
 
 
 def frozen() -> bool:
@@ -50,6 +51,33 @@ def command(module: str, *args: str) -> list[str]:
     if frozen():
         return [helper_program(), module, *args]
     return [helper_program(), "-I", "-m", "vibe_launcher." + module, *args]
+
+
+def _short_path(path: str) -> str:
+    """The 8.3 form of a Windows path (no spaces) when the volume keeps short names; otherwise the path unchanged."""
+    if os.name != "nt":
+        return path
+    import ctypes
+    buffer = ctypes.create_unicode_buffer(1024)
+    size = ctypes.windll.kernel32.GetShortPathNameW(path, buffer, len(buffer))
+    return buffer.value if 0 < size < len(buffer) else path
+
+
+def hook_command(module: str, *args: str) -> str:
+    """One command line for helper ``module`` that a CLI runs through its own shell (Claude Code: Git Bash or PowerShell
+    on Windows, sh elsewhere). Paths use forward slashes and no quotes where possible, which both shells accept."""
+    parts = command(module, *args)
+    if os.name == "nt":
+        parts[0] = _short_path(parts[0])
+    parts = [part.replace("\\", "/") for part in parts] if os.name == "nt" else parts
+    if all(part and not any(char in part for char in " '\"$`&;|<>()") for part in parts):
+        return " ".join(parts)
+    if os.name != "nt":
+        import shlex
+        return shlex.join(parts)
+    # A path with spaces and no short name: let PowerShell call it, from either shell.
+    inner = "& " + " ".join("'" + part.replace("'", "''") + "'" for part in parts)
+    return 'powershell -NoProfile -NonInteractive -Command "' + inner + '"'
 
 
 def gui_launch() -> tuple[str, list[str]]:

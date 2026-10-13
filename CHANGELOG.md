@@ -4,6 +4,79 @@
 每個版本一節：`## [x.y.z] - YYYY-MM-DD`，先條列中文重點，再以 `### English` 小節條列相同內容的英文；更新資訊依系統顯示語言選擇，繁體中文系統顯示中文，其餘一律英文，並可複製兩種語言的全文。
 目前仍在開發階段，不保留舊版相容，設定或資料庫欄位的移除直接寫在條列中即可。
 
+## [Unreleased]
+
+- 新增：Codex 配額分類顯示、依環境區隔的帳號池與視覺管理流程，提供指定優先序、輪流分配及依可用額度策略。
+- 新增：Codex 終端改由 Launcher 管理的官方 app-server 執行，工具列可安全切換帳號（未設流程也可用）：只在驗證過的安全時點交接確切對話，保留模型、reasoning、權限、指示檔、skills 與 MCP 設定，未知工具結果不重播；額度失敗的工作在新帳號或可信重設後的同帳號自動接續，只通知模式不自動開始。
+- 新增：配額監測只在啟用流程的終端存續期間執行，同機同帳號共用快取與租約，失敗退避；重新載入、還原工作區或重開工作階段時沿用確切對話、最後帳號與流程。
+- 改善：SSH helper 依動作只傳送需要的程式；較大的受管理 Codex helper 改用緊湊編碼，仍在 Windows 命令列長度內。
+- 新增：切換前分兩層比對。環境層（指示檔、設定擴充、實際載入的 skills）必須一致；核准規則只做唯讀比對，不同時列出差異，由使用者取消或明確選擇「以目前規則對齊目標帳號」（先備份，目標帳號在其他終端使用中時阻擋）；帳號層（外掛、連結的應用、MCP 登入）缺少時列出清單，手動切換由使用者選擇照常切換或取消，流程積木可預先設定。
+- 新增：Claude Code 終端同樣可安全切換帳號與使用配額流程：以 Launcher 指定的對話 ID 啟動，透過只對該次啟動有效的 hooks 判斷安全時點，切換時結束 CLI、複製對話紀錄並以新帳號接回同一對話；額度由狀態列取得。
+- 新增：Claude 使用者自訂的狀態列由 Launcher 包一層後照常顯示，同時記錄額度；開發用 `scripts/simulate_quota.py` 可模擬額度測試切換與接續。
+- 修正：額度重設瞬間的舊觀察不再抹掉可信重設時間（原本會使重設後不自動接續）；交接後改以新帳號回報的設定為比對基準（原本第二次切換會被誤判為設定變更）。
+- 修正：SSH 上 tmux 改以 UTF-8 連線與執行，Claude／Codex 的符號與圖示不再變成 `_`；終端內的 CLI 自行結束（例如 Ctrl+C）後，「重新載入」會以同一段對話重新開啟，而不是嘗試連回已不存在的 tmux 工作階段。
+- 修正：SSH 終端內的 Codex／Claude 一直以 80×24 繪製（tmux 狀態列重複疊在畫面中間）；開啟與重新接回時 ssh 直接使用終端，伺服器取得實際大小並跟著調整視窗。
+- 修正：SSH 上的 tmux 工作階段選項（連線標題、Ctrl+B 離開鍵、Harness 服務的擁有者標記）因目標寫法錯誤從未生效，導致「離開並在背景繼續」一直顯示「尚未連上伺服器的 tmux 工作階段」、Harness 啟動時誤報擁有者標記失敗。
+- 伺服器上的 tmux 改以工作區為單位：每個工作區一個 tmux 工作階段（以工作區 id 命名），工作區的終端是其中的視窗，不再每開一個終端就多一個工作階段；分頁只在開著時使用一個自動消失的檢視工作階段。
+- 修正：伺服器使用 tmux 3.4 等舊版時，每次接上都會把終端對裝置屬性查詢的回覆（`61;6;7;…c`）當成輸入打進 shell；接上時先停在暫時視窗約 1 秒吸收它（tmux 3.6 以上不需要）。tmux 視窗不再印出內部狀態行，並開啟 focus-events（只限 Launcher 自己的 tmux）。
+- 刪除工作區時，若它在伺服器上還有終端，會說明對應的 tmux 工作階段，刪除後結束該工作階段（每台伺服器連線一次）。
+- 帳號頁每種工具的卡片內依環境分成小卡片（本機在前），環境內帳號超過 4 個時可捲動。
+- 專案、帳號、環境與工作階段清單新增右鍵選單，提供與按鈕相同的動作。
+- 修正：Claude 切換帳號被帳號自己同步的 skills（`skills/synced`）與 CLI 內部資料夾（`skills/.trash`）擋下；這些不再複製或比對。
+- 修正：Claude 交接到從未在該處開啟過的帳號時，會停在首次使用引導與一次性提示並吞掉接續內容；交接時帶上已完成的引導、已看過的提示與該資料夾的信任（不含任何憑證）。尚未說過話的對話交接時改為在新帳號重新開始，不再因找不到對話而讓終端結束。
+- 內建終端的瀏覽器引擎（Qt WebEngine，約 200 MB 程式碼）改為開第一個終端時才載入：閒置時載入的模組由 150 個降為 118 個，工作集約 102 MB；防毒掃描等情況下工作集的上限由約 420 MB 降為約 210 MB。
+- 相容：不支援 `--remote` 的舊版 Codex CLI 照常以一般模式啟動並提示。
+- 修正：未知、非有限數值及布林格式的配額資料不再被當成可用額度；多配額類別不混用舊版摘要。
+- 新增：可儲存的配額方案與積木編輯器：三個範本（依序接替、輪流切換、額度優先，預設低額度 10%、每 120 秒查詢、無帳號時等待並驗證恢復），可加入條件、選帳號、等待、通知與維持積木並接線（滑鼠拖曳、右鍵「連接至」或鍵盤），儲存前檢查斷線、缺少分支、迴圈、不可達與未經低額度條件的切換，錯誤標示在積木旁；可新增、另存、重新命名、刪除與不啟動工作的預覽。終端預設「無」方案，套用時複製方案，修改方案後需「重新套用」。
+- 修正：切換前不再雙向合併兩個帳號的核准規則（切換遭拒或取消時原帳號仍被寫入目標帳號的 allow 規則）。
+- 修正：Claude 安全點改以同步 hooks 與交接鎖判定（`onFailure: "block"`，需 Claude Code 2.1.295 以上，否則以一般模式啟動並提示）：送出 prompt 與執行工具前先記錄，交接中被擋下；hook 失敗或逾時不再放行。原本以兩秒安靜期判斷，hook 延遲時可能誤判安全。
+- 修正：Claude 目標帳號回報與預期相同的對話 ID 與模型後才成為使用中帳號（模型 ID 必須與來源回報的完全相同，缺少或不符即回退；來源模型尚未回報時等待並提示，不改用帳號預設模型；準備期間設定變更時放開交接鎖重新檢查，不停止來源，目標啟動、驗證與回退使用同一份確認後的設定）；交接時須讀完整個事件佇列，積壓過多時延後交接；目標啟動失敗、逾時或模型不符時重新啟動原帳號，回報帳號與實際程序一致（原本回退後仍回報目標帳號）。Codex 交接失敗時同樣以原帳號接回同一對話。
+- 修正：停用、更換或移除方案會取消舊方案尚未執行的自動切換與自動續接；已開始的交接完成安全收尾後停止。
+- 修正：SSH 終端關閉或連線中斷時，伺服器端依 tmux 實際 client 狀態暫停額度查詢與自動切換，重新連上後恢復；工作仍留在 tmux。
+- 改善：額度查詢失敗的冷卻時間依帳號與環境跨終端共用；輪流順序依終端保存，成功切換才前進，精確重開後沿用；新工作依方案先選帳號，恢復的對話維持原帳號。
+- 修正：Windows 封裝會從 PATH 收進其他程式的 ICU（例如 LibreOffice 的 ICU 78），使 QtCore 載入失敗；封裝改用系統 ICU。
+- 驗證範圍：官方 native TUI 經 Launcher 交接的完整流程已以 Codex 0.162.1 離線驗證；本機兩個真實訂閱帳號的手動切換已驗證；真實額度恢復與 SSH／tmux 主機尚未驗證。
+
+### English
+
+- New: separate Codex quota buckets, environment-specific account pools and a visual management flow with priority, round-robin and available-quota strategies.
+- New: Codex terminals run through a launcher-managed official app-server; the terminal toolbar can switch accounts safely (with or without a flow): the exact conversation is handed over only at a verified safe point, keeping model, reasoning, permissions, instructions, skills and MCP settings, and unknown tool outcomes are never replayed. A task that failed on quota continues on the new account, or on the same account after a trusted reset; notify-only never starts work.
+- New: quota monitoring runs only while a terminal with an enabled flow is open, shares one cache and lease per host and account, and backs off on failure; reloading a terminal, restoring a workspace or restarting a session keeps the exact conversation, last account and flow.
+- Improved: SSH helpers carry only the code their action needs; the larger managed Codex helper uses a compact encoding that still fits the Windows command line.
+- New: switching compares two layers. Environment-level state (instructions, settings extensions, loaded skills) must match; approval rules are only compared, and when they differ the user cancels or explicitly aligns the target account with the current rules (backed up first, refused while the target is open in another terminal); account-level capabilities (plugins, connected apps, MCP sign-ins) the target lacks are listed, and the user chooses to switch without them or cancel, or sets this in the flow.
+- New: Claude Code terminals can switch accounts safely and use quota flows too: they start with a launcher-chosen conversation id, hooks passed for that launch only find safe points, and a switch ends the CLI, copies the transcript and resumes the same conversation on the other account; quota comes from the status line.
+- New: a Claude status line the user configured keeps showing, wrapped by the launcher to record quota; the developer tool `scripts/simulate_quota.py` simulates quota to test switching and continuation.
+- Fix: the stale observation right at a quota reset no longer erases the trusted reset time (the task did not continue after the reset); after a handoff the new account's own settings are the comparison baseline (a second switch was refused as "settings changed").
+- Fix: tmux on SSH hosts attaches and runs with UTF-8, so Claude/Codex symbols and icons no longer turn into `_`; after the CLI in a terminal ended by itself (for example Ctrl+C), Reload starts the same conversation again instead of attaching to a tmux session that no longer exists.
+- Fix: Codex/Claude in SSH terminals were always drawn for 80x24 (tmux status bars stacked mid-screen); launching and reattaching now give ssh the terminal itself, so the server gets the real size and follows resizes.
+- Fix: tmux session options on SSH hosts (the attached title, the Ctrl+B leave key, the Harness service owner mark) never took effect because of a wrong target form, so "Leave and keep running" always said the terminal was not yet connected to the server's tmux session and Harness start reported an ownership-marking failure.
+- tmux on servers is now per workspace: one tmux session per workspace (named by the workspace id) with each terminal as one of its windows, instead of a new session for every terminal; an open tab uses a short-lived view session that disappears when it leaves.
+- Fix: with older tmux on the server (3.4 seen), every attach typed the terminal's answer to tmux's device-attributes query (`61;6;7;...c`) into the shell; attaching now rests on a placeholder window for about a second to absorb it (not needed from tmux 3.6). tmux windows no longer print internal status lines, and focus events are on (the launcher's own tmux only).
+- Deleting a workspace that still has terminals on a server names its tmux session and ends it after deletion (one
+  connection per server).
+- The Accounts page groups each tool's accounts into environment plates (this PC first); an environment with more
+  than four accounts scrolls.
+- Right-click menus on the project, account, environment and session lists offer the same actions as the buttons.
+- Fix: Claude account switching was blocked by account-synced skills (`skills/synced`) and the CLI's own folders
+  (`skills/.trash`); these are no longer copied or compared.
+- Fix: a Claude handoff to an account never opened there stopped on the first-run wizard and one-time notices and
+  swallowed the continuation; the handoff now carries the finished wizard, seen notices and this folder's trust (no
+  credentials). A conversation with nothing said yet starts fresh on the new account instead of ending the terminal.
+- The built-in terminal's browser engine (Qt WebEngine, about 200 MB of code) now loads with the first terminal: an
+  idle launcher maps 118 instead of 150 modules, its working set is about 102 MB, and when an antivirus scan touches
+  every loaded image the working set peaks near 210 MB instead of about 420 MB.
+- Compatibility: older Codex CLIs without `--remote` start normally and say so.
+- Fix: unknown, non-finite and boolean quota values no longer imply available capacity; separate quota buckets do not mix with the legacy summary.
+- New: saved quota plans and a block editor: three templates (take over in order, rotate accounts, most quota first; low quota 10%, a check every 120 s, wait and verify recovery when none is left), condition, account-selection, wait, notify and keep blocks wired by dragging, a right-click "Connect to" menu or the keyboard; saving checks open branches, loops, unreachable blocks and switching that does not follow a low-quota condition, marking each problem beside its block; new, save as, rename, delete and a preview that starts nothing. Terminals start with no plan; applying copies the plan, and an edited plan reaches a terminal only when applied again.
+- Fix: switching no longer merges both accounts' approval rules in both directions (a refused or cancelled switch still wrote the target's allow rules into the source account).
+- Fix: Claude safe points use synchronous hooks and a handoff lock (`onFailure: "block"`, Claude Code 2.1.295 or later; older versions start unmanaged and say so): prompts and tools are recorded before they run and refused during a handoff, and a hook that fails or times out no longer lets work through. The previous two-second quiet period could call a busy session safe when hooks were late.
+- Fix: a Claude target becomes the active account only after it reported exactly the expected conversation id and model (the model id must equal the one the source reported, missing or different means rollback; until the source reported its model the switch waits and says so, never using an account default; settings changed during preparation release the lock and are checked again without stopping the source, and the target start, verification and rollback use one confirmed snapshot); a handoff must read the whole event queue and waits when the backlog is too long; if it fails to start, times out or runs another model, the source account is started again and the reported account always matches the running CLI (the fallback used to report the target). A failed Codex handoff likewise resumes the same conversation on the source account.
+- Fix: disabling, replacing or removing a plan withdraws the old plan's queued automatic switch and automatic continuation; a handoff already running finishes its safe sequence first.
+- Fix: when an SSH terminal is closed or its connection drops, the server pauses quota checks and automatic switching from tmux's real client state and resumes when a terminal attaches again; the work stays in tmux.
+- Improved: quota-query failure cool-downs are shared per account and environment across terminals; each terminal keeps its own rotation, advanced only by a successful switch and kept across an exact reopen; new work starts on the account its plan selects, resumed conversations keep theirs.
+- Fix: the Windows build could bundle another program's ICU from PATH (LibreOffice's ICU 78) and then fail to load QtCore; it now uses the system ICU.
+- Verified: the complete native TUI handoff through the launcher, offline with Codex 0.162.1; a manual switch between two real local subscription accounts; real quota recovery and SSH/tmux hosts are not yet verified.
+
 ## [0.2.2] - 2026-10-11
 
 - 新增：關閉視窗時可縮到系統匣（設定 → 一般 → 視窗，預設關閉）；終端與 SSH 工作持續執行，可從匣圖示重新開啟或結束。

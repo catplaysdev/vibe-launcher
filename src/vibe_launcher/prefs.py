@@ -8,6 +8,8 @@ A value this build cannot use falls back to its default; keys it does not know a
 from __future__ import annotations
 
 import json
+import re
+import uuid
 from pathlib import Path
 
 from .theme import TERMINAL_FONT_SIZES, THEMES, UI_SCALES, valid_color, valid_font_family
@@ -41,7 +43,7 @@ def valid_desktop(value: object) -> dict:
     for slot in (slots if isinstance(slots, list) else [])[:16]:
         if not isinstance(slot, dict) or slot.get("kind") not in {"agent", "shell"}:
             continue
-        clean = {key: slot[key] for key in ("preset_id", "kind", "account_id", "environment_id", "terminal_profile")
+        clean = {key: slot[key] for key in ("preset_id", "kind", "account_id", "environment_id", "terminal_profile", "session_id")
                  if isinstance(slot.get(key), str) and 0 < len(slot[key]) <= 128}
         if "preset_id" in clean:
             result["slots"].append(clean)
@@ -70,6 +72,8 @@ class UiPrefs:
         self.workspace_icons: dict[str, dict] = {}  # workspace id ("@default" for the unsaved default desktop) -> entry
         self.default_workspace_name = ""        # the default desktop's own name; "" = the translated "Default workspace"
         self.default_workspace: dict = {"layout": "tabs", "slots": []}   # the default desktop's terminals, kept as you go
+        self.default_workspace_id = uuid.uuid4().hex   # the default desktop's own id (its tmux session on a server)
+        self.default_workspace_id_saved = False
         self.last_workspace = ""                # the desktop shown when the launcher last ran ("" = default)
         self.confirm_reload = True              # ask before reloading a terminal
         self.confirm_send = True                # ask before sending the input bar's text
@@ -116,6 +120,9 @@ class UiPrefs:
         self.workspace_icons = valid_entries(data.get("workspace_icons", {}))
         self.default_workspace_name = valid_workspace_name(data.get("default_workspace_name"))
         self.default_workspace = valid_desktop(data.get("default_workspace"))
+        identifier = data.get("default_workspace_id")
+        if isinstance(identifier, str) and re.fullmatch(r"[0-9a-f]{32}", identifier):
+            self.default_workspace_id, self.default_workspace_id_saved = identifier, True
         last = data.get("last_workspace")
         self.last_workspace = last if isinstance(last, str) and len(last) <= 128 and "@" not in last else ""
         self.confirm_reload = data.get("confirm_reload", True) is not False
@@ -152,6 +159,7 @@ class UiPrefs:
                 "workspace_icons": {k: dict(v) for k, v in sorted(self.workspace_icons.items())},
                 "default_workspace_name": valid_workspace_name(self.default_workspace_name),
                 "default_workspace": valid_desktop(self.default_workspace), "last_workspace": self.last_workspace,
+                "default_workspace_id": self.default_workspace_id,
                 "confirm_reload": bool(self.confirm_reload), "confirm_send": bool(self.confirm_send),
                 "theme": self.theme, "accent": self.accent, "terminal_font_size": self.terminal_font_size,
                 "ui_font": valid_font_family(self.ui_font), "terminal_font": valid_font_family(self.terminal_font),
@@ -164,5 +172,6 @@ class UiPrefs:
     def save(self) -> None:
         try:
             runtime.write_json(self.path, self.snapshot())
+            self.default_workspace_id_saved = True
         except OSError:
             pass  # View preferences are best-effort; never block the UI on them.

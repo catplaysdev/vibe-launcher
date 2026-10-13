@@ -135,6 +135,7 @@ def test_start_checks_dependencies_and_does_not_install(tmp_path, monkeypatch, r
     result = runtime.harness_action(request(), tmp_path)
     assert result["status"] == "starting"
     assert [call[0] for call in calls] == ["new-session", "set-option"]
+    assert calls[1][2].startswith("=") and calls[1][2].endswith(":")     # options need "=name:" for an exact match
     script = (tmp_path / "web-services" / result["service_key"] / "start.sh").read_text()
     assert "--host 127.0.0.1" in script and "--no-open" in script
     assert "127.0.0.1:4080" in script

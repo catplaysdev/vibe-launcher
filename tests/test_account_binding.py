@@ -131,6 +131,7 @@ class FakeService:
         self.calls = []
 
     def start(self, action, **kwargs):
+        kwargs.pop("workspace_id", None)      # which tmux session a launch joins is tested in test_workspace
         self.calls.append((action, kwargs))
 
 
@@ -218,9 +219,12 @@ def test_an_environment_without_a_usable_account_says_what_to_do(view, monkeypat
 
 
 def test_account_rows_say_where_the_login_lives(view):
-    rows = [listing.item(i).text() for listing in view.accounts_page.lists.values() for i in range(listing.count())]
-    assert any("GPU Claude" in r and "GPU" in r for r in rows)
-    assert any("API" in r and "所有環境" in r for r in rows)
+    # each environment plate names its environment; a row's tooltip still says it in full
+    lists = view.accounts_page.lists
+    tips = [listing.item(i).toolTip() for listing in lists.values() for i in range(listing.count())]
+    assert any("GPU Claude" in tip and "GPU" in tip for tip in tips)
+    assert any("API" in tip and "所有環境" in tip for tip in tips)
+    assert any(key.endswith("/gpu") for key in lists) and any(key.endswith("/") for key in lists)
 
 
 def test_quota_for_a_bound_account_only_offers_its_own_environment(view):
