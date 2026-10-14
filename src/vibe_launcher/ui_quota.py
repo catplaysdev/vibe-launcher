@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 from PySide6.QtWidgets import QDialog
 
-from . import runtime
+from . import account_check, runtime
+from .account_check_dialog import CheckRunner, finding_text
 from .i18n import tr
 from .kit import ActionMenu, MenuAction, later
-from .quota_policy import PolicyStore, ProgressStore, plan_store
+from .quota_policy import PolicyStore, ProgressStore, plan_store, quota_flow
 from .quota_policy_dialog import QuotaPolicyDialog
 
 # Worker statuses (runtime.ManagedCodexSession.status, runtime.codex_control_status) as the terminal toolbar treats them.
@@ -112,6 +114,7 @@ class QuotaActions:
                 timer.stop()
                 timer.deleteLater()
                 polling.pop(tab_id, None)
+                getattr(self, "_plan_checks", {}).pop(tab_id, None)
         if getattr(self, "store", None) is None:
             return
         try:
@@ -153,7 +156,7 @@ class QuotaActions:
         except (OSError, ValueError) as error:
             self._error(tr("Could not configure quota management"), error)
             return
-        actions = [MenuAction(tr("None: no quota checks or automatic switching"), lambda: self._apply_quota_plan(tab_id, None),
+        actions = [MenuAction(tr("None: no quota checks, switching or auto continue"), lambda: self._apply_quota_plan(tab_id, None),
                               "check" if applied is None else "")]
         for plan in plans:
             mine = applied is not None and applied.plan_id == plan.id
@@ -162,7 +165,7 @@ class QuotaActions:
                 text = tr("Apply again: {name} (edited since)", name=plan.name)
             elif mine:
                 text = tr("{name} (applied)", name=plan.name)
-            actions.append(MenuAction(text, lambda plan=plan: self._apply_quota_plan(tab_id, plan), "check" if mine else ""))
+            actions.append(MenuAction(text, lambda plan=plan: self._check_then_apply(tab_id, plan), "check" if mine else ""))
         actions.append(MenuAction(tr("Edit plans…"), lambda: self.open_quota_plans(tab_id), "settings", separator_before=True))
         menu = ActionMenu(actions, self)
         if anchor is not None:
@@ -186,12 +189,110 @@ class QuotaActions:
                 raise ValueError(tr("No subscription accounts of this CLI in this environment"))
             applied = self._quota_policies().load().get(tab.info.session_id)
             snapshots = {account["id"]: self._quota_report(account["id"], tab.info.environment_id) or {} for account in accounts}
+            checker = aligner = None
+            if (tab.info.environment_id or "local") == "local":
+                # Profiles of this computer are compared ahead of time; a host's are compared there at each handoff.
+                root, project, session = self.store.path.parent, self._tab_project(tab), tab.info.session_id
+                checker = lambda chosen, reference: account_check.check(chosen, reference, root, project)  # noqa: E731
+                aligner = lambda target, reference: account_check.align(target, reference, root, session)  # noqa: E731
             dialog = QuotaPolicyDialog(self, accounts, tab.info.environment_id or "local", tab.info.tool, self._quota_plans(),
-                                       applied.plan_id if applied else "", snapshots)
+                                       applied.plan_id if applied else "", snapshots, own_account=tab.info.account_id,
+                                       session_id=tab.info.session_id, checker=checker, aligner=aligner)
             if self._ask_quota_policy(dialog) and dialog.result_plan is not None:
                 self._apply_quota_plan(tab_id, dialog.result_plan)
         except (OSError, ValueError) as error:
             self._error(tr("Could not configure quota management"), error)
+
+    def _tab_project(self, tab) -> Path:
+        path = self._by_id("presets", tab.info.preset_id).get("path") if tab.info.preset_id else ""
+        return Path(path) if path else Path.home()
+
+    def _plan_accounts(self, tab, plan) -> list:
+        """The accounts a plan may move this terminal between: its own and every account of a selection."""
+        records = {account["id"]: account for account in self._quota_accounts(tab.info.environment_id, tab.info.tool)}
+        ids = [tab.info.account_id] + [item for node in quota_flow(plan)["nodes"] if node.get("type") == "select"
+                                       for item in node.get("accounts", [])]
+        return [records[item] for item in dict.fromkeys(ids) if item in records]
+
+    def _in_background(self, work, done):
+        """Run ``work`` off the GUI thread; ``done(result, error)`` runs on it afterwards."""
+        runner = CheckRunner(self)
+
+        def finished(_generation, result, error):
+            runner.deleteLater()
+            done(result, error)
+        runner.done.connect(finished)
+        runner.run(work)
+
+    def _difference_text(self, findings) -> str:
+        names = {account["id"]: account.get("name", account["id"]) for account in self._records.get("accounts", [])}
+        items = ["{}: {}".format(names.get(finding.account_id, finding.account_id), finding_text(finding, names))
+                 for finding in findings[:3]]
+        return "; ".join(items) + (" …" if len(findings) > 3 else "")
+
+    def _check_then_apply(self, tab_id, plan):
+        """A saved plan is applied only while its accounts still match (they may have changed since it was saved)."""
+        tab = self._quota_tab(tab_id)
+        if not tab:
+            return
+        accounts = self._plan_accounts(tab, plan)
+        if (tab.info.environment_id or "local") != "local" or len(accounts) < 2:
+            self._apply_quota_plan(tab_id, plan)
+            return
+        root, project = self.store.path.parent, self._tab_project(tab)
+        self._toast(tr("Checking the accounts of {name}…", name=plan.name), "info")
+
+        def done(report, error):
+            if error is not None or report is None:
+                self._toast(tr("{name} was not applied: the accounts could not be checked ({error})", name=plan.name,
+                               error=str(error)[:120]), "warn")
+                return
+            pending = report.open(plan.accepted_gaps)
+            if pending:
+                self._toast(tr("{name} was not applied: {count} account differences to resolve in Edit plans… ({items})",
+                               name=plan.name, count=len(pending), items=self._difference_text(pending)), "warn")
+                return
+            self._plan_checks_state(tab_id)["signature"] = report.signature
+            self._apply_quota_plan(tab_id, plan)
+        self._in_background(lambda: account_check.check(accounts, tab.info.account_id, root, project), done)
+
+    def _plan_checks_state(self, tab_id) -> dict:
+        checks = getattr(self, "_plan_checks", {})
+        self._plan_checks = checks
+        return checks.setdefault(tab_id, {})
+
+    def _watch_plan_accounts(self, tab_id, tab, policy: dict) -> None:
+        """While a plan is applied: when a profile it uses changed (sizes and times of its files, looked at with each
+        status poll), check again and warn about new differences before an automatic switch runs into them. The
+        worker refuses such a switch anyway; this tells the user early."""
+        if (tab.info.environment_id or "local") != "local":
+            return
+        try:
+            plan = runtime.checked_quota_policy(policy)
+        except ValueError:
+            return
+        accounts = self._plan_accounts(tab, plan)
+        state = self._plan_checks_state(tab_id)
+        if len(accounts) < 2 or state.get("running"):
+            return
+        root, project = self.store.path.parent, self._tab_project(tab)
+        if account_check.signature(accounts, root) == state.get("signature"):
+            return
+        state["running"] = True
+
+        def done(report, error):
+            state["running"] = False
+            if error is not None or report is None:
+                return
+            state["signature"] = report.signature
+            pending = report.open(plan.accepted_gaps)
+            shown = sorted((finding.account_id, finding.key) for finding in pending)
+            if pending and shown != state.get("warned"):
+                self._toast(tr("{terminal}: the accounts of its quota plan differ now ({items}); an automatic switch to "
+                               "them stops. Resolve it in Edit plans….", terminal=tab.info.label,
+                               items=self._difference_text(pending)), "warn")
+            state["warned"] = shown
+        self._in_background(lambda: account_check.check(accounts, tab.info.account_id, root, project, refresh=False), done)
 
     def _apply_quota_plan(self, tab_id, plan):
         """Copy a saved plan to this terminal (later edits of the plan do not reach it), or remove its copy (None)."""
@@ -310,6 +411,8 @@ class QuotaActions:
             pending = None
             self._toast(tr("Account handoff still pending; check status manually"), "warn")
         self._schedule_quota_poll(tab_id, pending, policy if watched else None)
+        if watched and getattr(self, "store", None) is not None:
+            self._watch_plan_accounts(tab_id, tab, policy)
         message = tr(result["message"]) if isinstance(result.get("message"), str) and result["message"] else {
             "switching": tr("Account handoff in progress"),
             "running": tr("Task running; account handoff waits for a safe point"),

@@ -42,13 +42,13 @@ HISTORY_ONLY = {"_copy_transcripts", "sync_history", "_same_project_path", "_cod
 SHARED_GITHUB = {"github_env", "github_session_env", "github_author", "github_helper"}
 
 # Each remote helper ships only the code its action reaches, so every command stays under the Windows command-line
-# limit. SSH hosts are never Windows. tests/test_production_integration.py runs every feature's own path on the shipped
+# limit. SSH hosts are never Windows. tests/test_runtime.py runs every feature's own path on the shipped
 # module, so a missing definition fails there and not on a server.
 WINDOWS_ONLY = {"windows_secret", "windows_user_sid", "windows_process_alive"}
 # The managed Codex terminal: the launcher-owned app-server bridge, its controller and the quota monitor.
 MANAGED_ONLY = {"QuotaSelection", "_quota_timestamp", "quota_state", "select_quota_account", "commit_quota_cursor",
                 "flow_outcome", "initial_quota_account", "checked_quota_policy", "quota_flow", "quota_template", "flow_issues",
-                "claude_handoff_lock", "claude_handoff_locked",
+                "flow_link_issue", "claude_handoff_lock", "claude_handoff_locked",
                 "managed_codex_command", "managed_codex_supported", "codex_profile_fingerprint", "_instruction_identity",
                 "instruction_sources_match", "observed_quota", "CodexQuotaMonitor", "ManagedCodexSession",
                 "thread_owner_active", "stop_process", "run_managed_codex", "CodexControlError", "ManagedCodexBridge", "CodexHandoffBlocked",
@@ -164,7 +164,8 @@ def remote_command(request: dict) -> str:
     runtime.validate_request(request)
     source = selfcmd.runtime_source()
     digest, compressed = _compressed_runtime(source, remote_feature(request), request.get("language", "en"))
-    payload = base64.urlsafe_b64encode(json.dumps(request).encode("utf-8")).decode("ascii")
+    request_json = json.dumps(request).encode("utf-8")
+    payload = "'" + base64.urlsafe_b64encode(request_json).decode("ascii") + "'"
 
     def bootstrap(load: str) -> str:
         return ("import base64,lzma,pathlib,os,sys,hashlib,uuid;" + load +
@@ -177,17 +178,20 @@ def remote_command(request: dict) -> str:
                 "ns['private_dir'](d);ns['assert_private_path'](p);"
                 "t=d/('upload-'+uuid.uuid4().hex+'.tmp');"
                 "f=t.open('xb');os.chmod(t,0o600);f.write(b);f.close();t.replace(p);"
-                f"os.execv(sys.executable,[sys.executable,'-I',str(p),'{payload}'])")
+                f"os.execv(sys.executable,[sys.executable,'-I',str(p),{payload}])")
 
     command = shlex.join(["/usr/bin/python3", "-I", "-c", bootstrap(f"b=lzma.decompress(base64.b85decode('{compressed}'));")])
     if len(command) > 28000:
-        # Too long as ASCII: carry the helper as a separate argument, 14 bits per character. The host recovers the
-        # exact bytes with os.fsencode whatever its locale, and the digest check above still guards them.
-        raw = base64.b85decode(compressed)
+        # Too long as ASCII: carry the helper as a separate argument, 14 bits per character, followed by the request
+        # (compressed: account pools and flows repeat themselves). The host recovers the exact bytes with os.fsencode
+        # whatever its locale, and the digest check above still guards the helper.
+        raw, packed = base64.b85decode(compressed), lzma.compress(request_json)
         load = ("c=[ord(x)-19968 for x in os.fsencode(sys.argv[1]).decode()];"
-                "b=lzma.decompress(b''.join((c[i]<<42|c[i+1]<<28|c[i+2]<<14|c[i+3]).to_bytes(7,'big') "
-                f"for i in range(0,len(c),4))[:{len(raw)}]);")
-        command = shlex.join(["/usr/bin/python3", "-I", "-c", bootstrap(load), _wide(raw)])
+                "a=b''.join((c[i]<<42|c[i+1]<<28|c[i+2]<<14|c[i+3]).to_bytes(7,'big') for i in range(0,len(c),4));"
+                f"b=lzma.decompress(a[:{len(raw)}]);"
+                f"q=base64.urlsafe_b64encode(lzma.decompress(a[{len(raw)}:{len(raw) + len(packed)}])).decode();")
+        payload = "q"
+        command = shlex.join(["/usr/bin/python3", "-I", "-c", bootstrap(load), _wide(raw + packed)])
     if len(command) > 28000 or len(command.encode("utf-8")) > 120000:
         raise ValueError(tr('service.80d4e1d496b1'))
     return command
