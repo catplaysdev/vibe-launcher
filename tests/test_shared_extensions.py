@@ -29,7 +29,7 @@ def home(tmp_path):
     _write(base / "history.jsonl", "private history")
     _write(base / "projects" / "p" / "log.jsonl", "private")
     _write(base / "settings.json", json.dumps({
-        "model": "claude-x", "theme": "dark",
+        "model": "claude-x", "theme": "dark", "autoContinueAtUsageLimit": False,
         "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "echo start"}]}]},
         "permissions": {"allow": ["Bash(ls)"]},
         "env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1", "ANTHROPIC_API_KEY": "SECRET",
@@ -68,6 +68,7 @@ def test_settings_keep_hooks_but_drop_routing_and_secrets(tmp_path, home):
     assert "SessionStart" in settings["hooks"] and settings["permissions"]["allow"] == ["Bash(ls)"]
     assert settings["env"] == {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1", "TEAM_FLAG": "on"}
     assert settings["model"] == "claude-x" and "apiKeyHelper" not in settings
+    assert settings["autoContinueAtUsageLimit"] is False       # the user's choice about unattended continuation
     # the launcher's own guard against provider overrides must still accept what we wrote
     runtime.check_settings(CLAUDE, root, tmp_path)
 

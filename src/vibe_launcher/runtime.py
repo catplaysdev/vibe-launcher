@@ -639,7 +639,8 @@ def emit(request: dict, event: dict) -> None:
 SHARE_DIRS = {"claude": ("skills", "agents", "commands", "hooks", "output-styles"),
               "codex": ("skills", "prompts", "agents", "rules", "plugins")}
 SHARE_FILES = {"claude": (), "codex": ("hooks.json",)}      # plus every top-level *.md (CLAUDE.md, AGENTS.md, files they @import)
-SHARE_SETTINGS = ("model", "hooks", "permissions", "statusLine", "outputStyle", "theme", "effortLevel", "attribution")
+SHARE_SETTINGS = ("model", "hooks", "permissions", "statusLine", "outputStyle", "theme", "effortLevel", "attribution",
+                  "autoContinueAtUsageLimit")
 SHARE_TOML_KEYS = ("model", "approval_policy", "sandbox_mode", "model_reasoning_effort", "personality", "notify",
                    "file_opener", "hide_agent_reasoning", "developer_instructions")
 SHARE_TOML_TABLES = ("mcp_servers", "features", "hooks", "skills", "agents", "plugins", "marketplaces", "tui",
@@ -2114,6 +2115,9 @@ def perform(request: dict, root: Path) -> int:
 
 
 # --- account quota (Codex subscription: the 5-hour and weekly windows) --------------------------------------------
+GAP_KINDS = ("plugin", "app", "mcp", "mcp_unknown")      # account-level differences a user may accept to switch without
+
+
 @dataclass(frozen=True)
 class QuotaPolicy:
     id: str
@@ -2125,7 +2129,7 @@ class QuotaPolicy:
     interval: int = 120
     when_empty: str = "wait"
     enabled: bool = True
-    on_gaps: str = "block"          # target lacks plugins/apps/MCP sign-ins of the source: "block" or "allow"
+    accepted_gaps: dict | None = None   # account id -> ["plugin:name", ...] the user accepted to switch to it without
     flow: dict | None = None        # the block workflow (see flow_issues); None: the template of strategy/when_empty
     plan_id: str = ""               # the saved plan this terminal copy came from, and that plan's revision
     revision: int = 0
@@ -2160,9 +2164,13 @@ class QuotaPolicy:
             raise ValueError("Monitoring interval must be between 60 and 86400 seconds")
         if when_empty not in ("wait", "notify-only") or type(enabled) is not bool:
             raise ValueError("Invalid empty-pool action")
-        on_gaps = data.get("on_gaps", "block")
-        if on_gaps not in ("block", "allow"):
-            raise ValueError("Invalid account difference action")
+        accepted = data.get("accepted_gaps") or {}
+        if (not isinstance(accepted, dict) or len(accepted) > 128
+                or any(not isinstance(names, list) or len(names) > 64 or not all(
+                    isinstance(name, str) and re.fullmatch(r"(%s):[^\x00-\x1f]{1,64}" % "|".join(GAP_KINDS), name)
+                    for name in names) for names in accepted.values())):
+            raise ValueError("Invalid accepted account differences")
+        accepted = {safe_id(key): sorted(set(names)) for key, names in accepted.items() if names} or None
         plan_id, revision = data.get("plan_id", ""), data.get("revision", 0)
         if not isinstance(plan_id, str) or (plan_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", plan_id)):
             raise ValueError("Invalid plan")
@@ -2176,7 +2184,7 @@ class QuotaPolicy:
                 raise ValueError("Invalid quota flow")
             flow = json.loads(text)
         return cls(data["id"], data["name"].strip(), data["environment_id"], tuple(ids), strategy,
-                   float(threshold), interval, when_empty, enabled, on_gaps, flow, plan_id, revision)
+                   float(threshold), interval, when_empty, enabled, accepted, flow, plan_id, revision)
 
     def to_dict(self) -> dict:
         result = asdict(self)
@@ -2340,8 +2348,9 @@ def initial_quota_account(request: dict, root: Path) -> dict:
 
 # --- the block workflow: declarative data the editor draws and the worker evaluates --------------------------------
 # A flow is a finite acyclic graph. It runs at every quota check and ends in one outcome: hand off to an account (only
-# through a "select" block, whose "found" branch always leads to the one mandatory safe-handoff block), wait for a
-# verified recovery, notify only, or keep the current account. Waiting is a state the worker schedules, never a loop.
+# through a "select" block, whose "found" branch always leads to the one safe-handoff block a flow with select blocks
+# has), wait and continue after a verified recovery ("wait", shown as Auto continue), notify only, or keep the current
+# account. Waiting is a state the worker schedules, never a loop.
 FLOW_KINDS = ("start", "condition", "select", "handoff", "wait", "notify", "keep")
 FLOW_BRANCHES = {"start": ("next",), "condition": ("yes", "no"), "select": ("found", "none")}
 FLOW_TESTS = ("low", "exhausted", "available")
@@ -2362,6 +2371,14 @@ def quota_template(strategy: str, account_ids, when_empty: str = "wait") -> dict
                       {"from": "low", "branch": "no", "to": "keep"},
                       {"from": "select", "branch": "found", "to": "handoff"},
                       {"from": "select", "branch": "none", "to": "empty"}]}
+
+
+def flow_link_issue(kind: str, branch: str, target: str, same: bool = False) -> str | None:
+    """Why ``branch`` of a ``kind`` block may not lead to a ``target`` block: "edge", "handoff" or None."""
+    if branch not in FLOW_BRANCHES.get(kind, ()) or target not in FLOW_KINDS or target == "start" or same:
+        return "edge"
+    # a found account always goes through the safe handoff, and only a found account does
+    return "handoff" if (kind == "select" and branch == "found") != (target == "handoff") else None
 
 
 def flow_issues(flow: object, pool: tuple) -> list[tuple[str, str]]:
@@ -2393,15 +2410,16 @@ def flow_issues(flow: object, pool: tuple) -> list[tuple[str, str]]:
     kinds = [node["type"] for node in nodes.values()]
     if kinds.count("start") != 1:
         issues.append(("", "start"))
-    if kinds.count("handoff") != 1:
+    if kinds.count("handoff") != (1 if "select" in kinds else 0):
         issues.append(("", "handoff"))
     edges = {}
     for edge in flow["edges"]:
         if not isinstance(edge, dict) or set(edge) != {"from", "branch", "to"}:
             return [("", "invalid")]
         source, branch, target = edge["from"], edge["branch"], edge["to"]
-        if (source not in nodes or target not in nodes or branch not in FLOW_BRANCHES.get(nodes[source]["type"], ())
-                or (source, branch) in edges or nodes[target]["type"] == "start" or source == target):
+        if (source not in nodes or target not in nodes
+                or flow_link_issue(nodes[source]["type"], branch, nodes[target]["type"], source == target) == "edge"
+                or (source, branch) in edges):
             issues.append((source if isinstance(source, str) and source in nodes else "", "edge"))
             continue
         edges[(source, branch)] = target
@@ -2410,8 +2428,8 @@ def flow_issues(flow: object, pool: tuple) -> list[tuple[str, str]]:
             target = edges.get((ident, branch))
             if target is None:
                 issues.append((ident, "unconnected"))
-            elif (node["type"] == "select" and branch == "found") != (nodes[target]["type"] == "handoff"):
-                issues.append((ident, "handoff"))       # a found account always goes through the safe handoff
+            elif flow_link_issue(node["type"], branch, nodes[target]["type"]):
+                issues.append((ident, "handoff"))
     if issues:
         return issues
     start = next(ident for ident, node in nodes.items() if node["type"] == "start")
@@ -2961,6 +2979,7 @@ class CodexQuotaMonitor:
 class ManagedCodexSession:
     """Worker-owned control and policy state; commands never derive from PTY text."""
     PASSIVE_QUOTA = False           # True: quota is only observed (Claude), never queried
+    CONTINUE_GRACE = 120            # passive quota: how long after a reset the CLI's own continuation may take
 
     def __init__(self, request: dict, root: Path, bridge):
         self.request, self.root, self.bridge = request, root, bridge
@@ -2975,6 +2994,7 @@ class ManagedCodexSession:
         self.notice = ""
         self._wait_mode = "wait"        # the flow outcome that set ``waiting``: "wait" (verify and resume) or "notify"
         self._continue = False
+        self._settled = None            # last_error_at of a quota failure already handed off or continued
         self._version = 0               # every applied (or removed) flow is a new version ...
         self._automatic = None          # ... and an automatic switch request remembers (target, version)
         self._stale_handoff = False     # an automatic handoff of an older version was already running when it changed
@@ -3015,8 +3035,9 @@ class ManagedCodexSession:
         message = state["reason"]
         if self.waiting and status == "idle":
             status = "waiting_quota"
-            message = (tr("No eligible account; waiting for verified quota recovery.") if self.policy and self._wait_mode == "wait"
-                       else tr("No eligible account; continue in the terminal when quota is available."))
+            message = (tr("Waiting for quota to recover; the task continues automatically.")
+                       if self._wait_mode == "wait" and self.next_retry is not None
+                       else tr("Quota ran out; continue the task in the terminal when quota is available."))
         elif self.notice and status in {"idle", "running"}:
             message = self.notice
         elif self.policy and not self._attached and status in {"idle", "running"}:
@@ -3133,8 +3154,10 @@ class ManagedCodexSession:
         align_codex_rules(source, target, self.root / "rules-backups" / safe_id(identifier) / stamp)
 
     def _accept_gaps(self, identifier: str, account: dict, gaps: list) -> None:
-        """Account-level differences go to the user: stop with the list unless they (or the flow) allowed them."""
-        if gaps and identifier not in self._allow_gaps and not (self.policy and self.policy.on_gaps == "allow"):
+        """Account-level differences go to the user: stop with the list unless they allowed this switch, or the plan
+        accepted exactly these for this account (anything that appeared since is not accepted)."""
+        accepted = set(((self.policy.accepted_gaps if self.policy else None) or {}).get(identifier, ()))
+        if gaps and identifier not in self._allow_gaps and not {gap["kind"] + ":" + gap["name"] for gap in gaps} <= accepted:
             names = ", ".join(gap["name"] for gap in gaps[:6]) + (" …" if len(gaps) > 6 else "")
             raise CodexHandoffBlocked(tr("{account} lacks {names}; install or sign in there, or switch without them",
                                          account=str(account.get("name") or identifier)[:64], names=names), gaps)
@@ -3275,6 +3298,12 @@ class ManagedCodexSession:
                 or before["pending_account"]):
             return
         moment = time.time()
+        # A failure that was handed off or continued is over; a later one has its own time.
+        failed = before.get("last_error_kind") in QUOTA_ERRORS and before.get("last_error_at") != self._settled
+        if self.PASSIVE_QUOTA and self.waiting and (failed and before["state"] == "running" or self.wait_reset is not None
+                                                    and moment >= self.wait_reset + self.CONTINUE_GRACE):
+            self._claude_after_limit(before, failed)
+            return
         current = before["account"]
         snapshots = self.monitor.snapshots()
         cached = snapshots.get(current)
@@ -3285,19 +3314,22 @@ class ManagedCodexSession:
                 cached = observed = fake
             else:
                 snapshots[identifier] = fake
-        if before.get("last_error_kind") in QUOTA_ERRORS:
-            # A turn that failed on quota is a known exhaustion until a later full query says otherwise.
+        if failed:
+            # A turn that failed on quota is a known exhaustion until a later full query says otherwise; a status line
+            # (passive quota) is no query, so it stays one until the task continues.
             failed_at = before.get("last_error_at") or moment
             checked = _quota_timestamp((observed or {}).get("checked_at"))
-            if checked is None or checked < failed_at:
-                meter = ((observed or {}).get("buckets") or {}).get("codex") or {}
-                observed = {"tool": "codex", "account_id": current, "environment_id": self.environment, "checked_at": failed_at,
+            if self.PASSIVE_QUOTA or checked is None or checked < failed_at:
+                buckets = (observed or {}).get("buckets")
+                meter = (buckets.get("codex") if isinstance(buckets, dict) else observed) or {}
+                observed = {"tool": "codex", "account_id": current, "environment_id": self.environment,
+                            "checked_at": moment if self.PASSIVE_QUOTA else failed_at,
                             "buckets": {"codex": {"windows": meter.get("windows") or [], "reached": before["last_error_kind"]}}}
         remaining, reset = quota_state(observed or {}, self.environment, moment, policy.interval, policy.threshold)
         if remaining is None:
             return                  # unknown quota is never a reason to move the conversation
         if remaining > policy.threshold and self.waiting:
-            self._recovered(before, cached, moment)
+            self._recovered(before, cached, moment, failed)
             return
         blocked = before.get("blocked") or {}
         if blocked.get("target") and blocked.get("at") != self._blocked_seen:
@@ -3380,13 +3412,13 @@ class ManagedCodexSession:
         if self.bridge.simulate_quota_failure():
             write_json(self.folder / "simulated-quota.json", dict(simulation, quota_failure_once="used"))
 
-    def _recovered(self, before: dict, cached: dict | None, moment: float) -> None:
+    def _recovered(self, before: dict, cached: dict | None, moment: float, failed: bool) -> None:
         """Leave the waiting state; continue the failed task only after a trusted reset passed, a query made after it
         shows quota again, the failure was a known quota failure and the bridge reports a verified safe checkpoint."""
         policy, reset = self.policy, self.wait_reset
         checked = _quota_timestamp((cached or {}).get("checked_at"))
         remaining = quota_state(cached or {}, self.environment, moment, policy.interval, policy.threshold)[0]
-        verified = (self._wait_mode == "wait" and before.get("last_error_kind") in QUOTA_ERRORS and reset is not None
+        verified = (self._wait_mode == "wait" and failed and reset is not None
                     and moment >= reset and checked is not None and checked >= reset
                     and remaining is not None and remaining > policy.threshold)
         if verified and not before.get("can_switch") and before["state"] != "running":
@@ -3397,10 +3429,22 @@ class ManagedCodexSession:
             try:
                 self.bridge.resume_work(recovered=True)
                 self.notice = tr("Quota recovered after its reset; the unfinished task continues.")
+                self._settled = before.get("last_error_at")
             except CodexControlError:
                 pass
         elif before["state"] == "running":
             self.notice = ""
+
+    def _claude_after_limit(self, before: dict, failed: bool) -> None:
+        """Claude Code continues a task stopped by a usage limit by itself after the reset ("Continue automatically at
+        usage limit", on by default). The launcher never restarts it for that: work running again ends the wait; a
+        task still stopped well after the reset (setting off, wait cancelled, computer asleep) is yours to continue."""
+        if before["state"] == "running":
+            self._settled = before.get("last_error_at")
+            self.waiting, self.next_retry, self.wait_reset, self.notice = False, None, None, ""
+        else:
+            self.next_retry = self.wait_reset = None
+            self.waiting = failed
 
     def tick(self) -> dict:
         self._commands()
@@ -3410,7 +3454,8 @@ class ManagedCodexSession:
         self._evaluate(before)
         after = self.bridge.tick()
         if after["account"] != before["account"]:
-            self.notice = ""
+            # The old account's quota failure is over: its continuation (below) belongs to the handoff.
+            self.notice, self._settled = "", after.get("last_error_at")
             if self._gaps_accepted:
                 self.notice = tr("Switched without {names}", names=", ".join(gap["name"] for gap in self._gaps_accepted[:6]))
             self._allow_gaps.discard(after["account"])

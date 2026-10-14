@@ -266,15 +266,16 @@ def test_account_differences_are_shown_and_the_user_decides(qtbot, accept):
         assert not view.calls
 
 
-def test_flow_editor_keeps_the_account_difference_choice(qtbot):
+def test_flow_editor_keeps_the_accepted_account_differences(qtbot, tmp_path):
+    from vibe_launcher.quota_policy import plan_store, template_plan
     from vibe_launcher.quota_policy_dialog import QuotaPolicyDialog
-    accounts = [{"id": "a", "name": "A", "tool": "codex", "auth": "subscription", "environment_id": "local"}]
-    dialog = QuotaPolicyDialog(None, accounts, "local", "codex")
+    accounts = [{"id": key, "name": key.upper(), "tool": "codex", "auth": "subscription", "environment_id": "local"}
+                for key in ("a", "b")]
+    store = plan_store(tmp_path)
+    store.save({"p1": template_plan("p1", "P", "priority", "local", ["a", "b"], accepted_gaps={"b": ["plugin:pages"]})})
+    dialog = QuotaPolicyDialog(None, accounts, "local", "codex", store, "p1")
     qtbot.addWidget(dialog)
-    dialog.on_gaps.setCurrentIndex(dialog.on_gaps.findData("allow"))
-    assert dialog.current_plan().on_gaps == "allow"
-    dialog.on_gaps.setCurrentIndex(dialog.on_gaps.findData("block"))
-    assert dialog.current_plan().on_gaps == "block"
+    assert dialog.current_plan().accepted_gaps == {"b": ["plugin:pages"]}
 
 
 @pytest.mark.parametrize("tool, visible", [("codex", True), ("claude", True), ("shell", False)])
@@ -292,3 +293,63 @@ def test_claude_terminals_offer_only_claude_accounts(qtbot):
                                   {"id": "c2", "name": "API", "tool": "claude", "auth": "api", "model": "m", "environment_id": "local"}]
     assert [a["id"] for a in view._quota_accounts("local", "claude")] == ["c1"]
     assert [a["id"] for a in view._quota_accounts("local")] == ["a", "b"]
+
+
+# --- a plan's accounts are checked again when it is applied and when their profiles change ------------------------------
+def fake_checks(monkeypatch, findings, stamp):
+    from vibe_launcher import account_check
+    from vibe_launcher.account_check import Report
+    calls = []
+
+    def check(accounts, reference, root, project, refresh=True):
+        calls.append(([account["id"] for account in accounts], reference, refresh))
+        return Report(reference, tuple(account["id"] for account in accounts), list(findings), {"a": stamp[0]})
+    monkeypatch.setattr(account_check, "check", check)
+    monkeypatch.setattr(account_check, "signature", lambda accounts, root: {"a": stamp[0]})
+    return calls
+
+
+def test_a_saved_plan_is_applied_only_while_its_accounts_still_match(qtbot, tmp_path, monkeypatch):
+    from vibe_launcher.account_check import Finding
+    view = plan_view(qtbot, tmp_path)
+    plan = template_plan("p1", "Main", "priority", "local", ["a", "b"])
+    calls = fake_checks(monkeypatch, [Finding("b", "plugin", "pages", ("a",))], ["1"])
+    view._check_then_apply("tab", plan)
+    qtbot.waitUntil(lambda: any("was not applied" in text for text, _ in view.messages), timeout=5000)
+    assert "Plugin pages" in view.messages[-1][0] and view.messages[-1][1] == "warn"
+    assert PolicyStore(tmp_path).load() == {} and not view.calls       # nothing reached the terminal
+    view._check_then_apply("tab", replace(plan, accepted_gaps={"b": ["plugin:pages"]}))
+    qtbot.waitUntil(lambda: "session" in PolicyStore(tmp_path).load(), timeout=5000)
+    assert calls == [(["a", "b"], "a", True)] * 2
+    assert view.calls[-1][1]["operation"]["control_action"] == "policy"
+
+
+def test_a_changed_profile_is_checked_again_and_new_differences_are_reported_once(qtbot, tmp_path, monkeypatch):
+    from vibe_launcher.account_check import Finding
+    view = plan_view(qtbot, tmp_path)
+    findings, stamp = [], ["1"]
+    calls = fake_checks(monkeypatch, findings, stamp)
+    status = {"status": "idle", "account_id": "a",
+              "policy": template_plan("session", "Main", "priority", "local", ["a", "b"]).to_dict()}
+
+    def poll():
+        view._quota_control_result("tab", dict(status), {"control_action": "status", "quiet": True})
+
+    def settled(count):
+        qtbot.waitUntil(lambda: len(calls) == count and not view._plan_checks["tab"].get("running"), timeout=5000)
+
+    poll()
+    settled(1)                                        # the first look after the plan runs (a restore, a reopen)
+    assert calls[0] == (["a", "b"], "a", False) and not view.messages
+    poll()
+    assert len(calls) == 1                            # nothing changed in the profiles: nothing is checked
+    findings.append(Finding("b", "plugin", "slides", ("a",)))
+    stamp[0] = "2"                                    # a plugin was installed on a meanwhile
+    poll()
+    settled(2)
+    warned = [text for text, tone in view.messages if "differ now" in text]
+    assert len(warned) == 1 and "slides" in warned[0]
+    stamp[0] = "3"
+    poll()
+    settled(3)
+    assert len([text for text, _ in view.messages if "differ now" in text]) == 1     # said once

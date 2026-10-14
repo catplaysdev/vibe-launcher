@@ -10,12 +10,14 @@ from typing import Mapping
 
 from . import runtime
 from .runtime import (QuotaPolicy as Policy, QuotaSelection as Selection, quota_state, quota_template, flow_issues,
-                      flow_outcome, quota_flow, select_quota_account as select, commit_quota_cursor as commit_cursor)
+                      flow_link_issue, flow_outcome, quota_flow, select_quota_account as select,
+                      commit_quota_cursor as commit_cursor)
 
 PLANS_FILE = "quota-plans.json"         # plan id -> plan (a policy whose id and plan_id are the plan's)
 COPIES_FILE = "quota-policies.json"     # terminal session id -> the copy applied to it
 PROGRESS_FILE = "quota-progress.json"   # terminal session id -> {"cursor": account id}
-TEMPLATES = ("priority", "round-robin", "available-quota")
+TEMPLATES = ("priority", "round-robin", "available-quota")     # the switching templates, named by their strategy
+AUTO_CONTINUE = "auto-continue"                                 # no switching: wait for this account's reset, continue
 
 
 class PolicyStore:
@@ -93,15 +95,30 @@ class ProgressStore:
             self.set(new, cursor)
 
 
+def continue_template() -> dict:
+    """Auto continue on the same account: once it ran out, wait for its verified reset and continue the task."""
+    return {"nodes": [{"id": "start", "type": "start", "x": 0, "y": 60},
+                      {"id": "exhausted", "type": "condition", "test": "exhausted", "x": 210, "y": 60},
+                      {"id": "continue", "type": "wait", "x": 420, "y": 0},
+                      {"id": "keep", "type": "keep", "x": 420, "y": 120}],
+            "edges": [{"from": "start", "branch": "next", "to": "exhausted"},
+                      {"from": "exhausted", "branch": "yes", "to": "continue"},
+                      {"from": "exhausted", "branch": "no", "to": "keep"}]}
+
+
 def template_plan(plan_id: str, name: str, template: str, environment_id: str, account_ids, **options) -> Policy:
-    """A new plan from one of the three ready-made templates (low quota 10%, check every 120 s, wait when none left)."""
-    if template not in TEMPLATES:
+    """A new plan from a ready-made template (low quota 10%, check every 120 s, continue after a reset when none left):
+    one of the three switching TEMPLATES, or AUTO_CONTINUE."""
+    if template not in TEMPLATES + (AUTO_CONTINUE,):
         raise ValueError("Unknown template")
+    flow = continue_template() if template == AUTO_CONTINUE else quota_template(template, account_ids, "wait")
     return runtime.checked_quota_policy(dict({"id": plan_id, "name": name, "environment_id": environment_id,
-                                              "account_ids": list(account_ids), "strategy": template, "threshold": 10.0,
-                                              "interval": 120, "when_empty": "wait", "plan_id": plan_id, "revision": 1,
-                                              "flow": quota_template(template, account_ids, "wait")}, **options))
+                                              "account_ids": list(account_ids),
+                                              "strategy": template if template in TEMPLATES else "priority",
+                                              "threshold": 10.0, "interval": 120, "when_empty": "wait",
+                                              "plan_id": plan_id, "revision": 1, "flow": flow}, **options))
 
 
 __all__ = ["Policy", "Selection", "PolicyStore", "ProgressStore", "plan_store", "template_plan", "quota_state", "select",
-           "commit_cursor", "flow_issues", "flow_outcome", "quota_flow", "quota_template", "TEMPLATES"]
+           "commit_cursor", "flow_issues", "flow_link_issue", "flow_outcome", "quota_flow", "quota_template",
+           "continue_template", "TEMPLATES", "AUTO_CONTINUE"]

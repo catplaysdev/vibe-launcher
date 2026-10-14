@@ -95,12 +95,14 @@ def test_every_helper_fits_the_windows_command_line(locale, request_):
     assert len(command) <= 28000 and len(command.encode("utf-8")) <= 120000
 
 
-def test_launch_with_a_saved_flow_fits_and_keeps_only_nonsecret_metadata():
+@pytest.mark.parametrize("locale", i18n.LANGUAGES)
+def test_launch_with_a_saved_flow_fits_and_keeps_only_nonsecret_metadata(locale):
     pool = [dict(CODEX, id=f"account{i}") for i in range(16)]
-    request = {"action": "launch", "account": CODEX, "path": "/home/user/example", "language": "zh-TW",
+    ids = [item["id"] for item in pool]
+    request = {"action": "launch", "account": CODEX, "path": "/home/user/example", "language": locale,
                "resume_thread_id": "thread-0123", "quota_accounts": pool,
-               "quota_policy": {"id": "flow", "name": "Flow", "environment_id": "local",
-                                "account_ids": [item["id"] for item in pool]}}
+               "quota_policy": {"id": "flow", "name": "Flow", "environment_id": "local", "account_ids": ids,
+                                "flow": runtime.quota_template("priority", ids)}}
     assert len(service.remote_command(request)) <= 28000
     with pytest.raises(ValueError):
         service.remote_command(dict(request, quota_accounts=[dict(pool[0], credential_revision="x")] + pool[1:]))
@@ -108,15 +110,21 @@ def test_launch_with_a_saved_flow_fits_and_keeps_only_nonsecret_metadata():
 
 def test_compact_transport_round_trips_through_a_real_command_line():
     """Windows hands the argument to Python as UTF-16; the host side decodes the exact bytes (os.fsencode)."""
-    request = {"action": "launch", "account": CODEX, "path": "/home/user/example"}
+    pool = [dict(CODEX, id=f"account{i}") for i in range(4)]
+    request = {"action": "launch", "account": CODEX, "path": "/home/user/中文 ' ; $(bad)", "quota_accounts": pool,
+               "quota_policy": {"id": "flow", "name": "Flow", "environment_id": "local",
+                                "account_ids": [item["id"] for item in pool]}}
     args = shlex.split(service.remote_command(request))
     assert len(args) == 5 and args[:3] == ["/usr/bin/python3", "-I", "-c"]
+    assert "$(bad)" not in args[3] and "account1" not in args[3]       # the request travels compressed with the helper
     digest = next(node.value for node in ast.walk(ast.parse(args[3]))
                   if isinstance(node, ast.Constant) and isinstance(node.value, str) and len(node.value) == 64)
-    loader = args[3].split("sys.exit(78)")[0] + "sys.stdout.write(hashlib.sha256(b).hexdigest())"
+    loader = args[3].split("sys.exit(78)")[0] + "sys.stdout.write(hashlib.sha256(b).hexdigest()+' '+q)"
     result = subprocess.run([sys.executable, "-I", "-c", loader, args[4]], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
-    assert result.stdout == digest == service._compressed_runtime(SOURCE, "managed", "en")[0]
+    received, payload = result.stdout.split(" ")
+    assert received == digest == service._compressed_runtime(SOURCE, "managed", "en")[0]
+    assert json.loads(base64.urlsafe_b64decode(payload)) == request     # what the helper's main() decodes
     # Every character is a printable BMP ideograph: one UTF-16 unit on Windows, no shell quoting needed.
     assert all(0x4E00 <= ord(char) < 0x4E00 + 2 ** 14 for char in args[4])
 

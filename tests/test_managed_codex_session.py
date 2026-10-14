@@ -582,7 +582,8 @@ def test_differing_approval_rules_block_without_writing_either_profile(session, 
 def test_a_flow_that_allows_gaps_cannot_skip_differing_rules(session, tmp_path, monkeypatch):
     controller, bridge, _ = session
     paths = rules_session(controller, bridge, tmp_path, monkeypatch)
-    controller.command(command("policy", policy=policy(on_gaps="allow").to_dict(), accounts=ACCOUNTS))
+    accepted = {"b": ["plugin:pages", "app:docs", "mcp:docs", "mcp_unknown:docs"]}    # rules cannot be accepted
+    controller.command(command("policy", policy=policy(accepted_gaps=accepted).to_dict(), accounts=ACCOUNTS))
     with pytest.raises(runtime.CodexHandoffBlocked):
         controller.validate_target("b", {})
     assert [path.read_bytes() for path in paths] == [RULE_A, RULE_B]
@@ -673,7 +674,7 @@ def test_switch_checks_every_loaded_skill_plugin_and_connected_app(session, tmp_
             controller._check_loaded_capabilities(ACCOUNTS[1], {})
 
 
-@pytest.mark.parametrize("choice", ["none", "command", "policy"])
+@pytest.mark.parametrize("choice", ["none", "command", "policy", "partly"])
 def test_account_differences_block_until_the_user_chooses(session, tmp_path, monkeypatch, choice):
     controller, bridge, _ = session
     controller.accounts.update({a["id"]: a for a in ACCOUNTS})
@@ -688,8 +689,12 @@ def test_account_differences_block_until_the_user_chooses(session, tmp_path, mon
     if choice == "command":
         controller.command(command("switch", target_account_id="b", accounts=ACCOUNTS, allow_gaps=True))
     elif choice == "policy":
-        controller.command(command("policy", policy=policy(on_gaps="allow").to_dict(), accounts=ACCOUNTS))
-    if choice == "none":
+        accepted = {"b": ["plugin:pages", "mcp:docs"]}
+        controller.command(command("policy", policy=policy(accepted_gaps=accepted).to_dict(), accounts=ACCOUNTS))
+    elif choice == "partly":
+        # The plan accepted the plugin; the MCP sign-in appeared later (nobody accepted it): the switch stops.
+        controller.command(command("policy", policy=policy(accepted_gaps={"b": ["plugin:pages"]}).to_dict(), accounts=ACCOUNTS))
+    if choice in ("none", "partly"):
         with pytest.raises(runtime.CodexHandoffBlocked) as blocked:
             controller.validate_target("b", {})
         assert blocked.value.gaps == [{"kind": "plugin", "name": "pages"}, {"kind": "mcp", "name": "docs"}]
@@ -698,10 +703,14 @@ def test_account_differences_block_until_the_user_chooses(session, tmp_path, mon
         assert controller._gaps_accepted[0]["name"] == "pages"
 
 
-def test_policy_rejects_an_unknown_difference_choice():
+@pytest.mark.parametrize("accepted", [{"b": ["rules:default.rules"]}, {"b": "plugin:pages"}, {"b": ["plugin:" + "x" * 65]},
+                                      {"../b": ["plugin:pages"]}, ["plugin:pages"]])
+def test_policy_accepts_only_account_level_differences_by_name(accepted):
     with pytest.raises(ValueError):
-        policy(on_gaps="sometimes")
-    assert policy().on_gaps == "block" and runtime.QuotaPolicy.from_dict(policy(on_gaps="allow").to_dict()).on_gaps == "allow"
+        policy(accepted_gaps=accepted)
+    assert policy().accepted_gaps is None
+    kept = policy(accepted_gaps={"b": ["mcp:docs", "plugin:pages", "plugin:pages"], "a": []})
+    assert runtime.QuotaPolicy.from_dict(kept.to_dict()).accepted_gaps == {"b": ["mcp:docs", "plugin:pages"]}
 
 
 def test_mcp_status_codex_cannot_determine_is_left_to_the_user(session, monkeypatch):
@@ -721,7 +730,7 @@ def test_a_block_report_is_applied_once_so_a_new_flow_can_decide_again(session):
     bridge.data["blocked"] = {"target": "b", "gaps": [{"kind": "plugin", "name": "pages"}], "at": 1}
     controller.tick()
     assert not bridge.switched and controller._skip["b"] > clock[0]
-    controller.command(command("policy", policy=policy(on_gaps="allow").to_dict(), accounts=ACCOUNTS))
+    controller.command(command("policy", policy=policy(accepted_gaps={"b": ["plugin:pages"]}).to_dict(), accounts=ACCOUNTS))
     controller.tick()                       # the same old report must not skip "b" again
     assert bridge.switched == ["b"]
 
@@ -897,3 +906,129 @@ def test_round_robin_progress_is_reported_and_restored(tmp_path, monkeypatch):
         assert controller.cursor is None                    # a pool without that account starts over
     finally:
         controller._closed.set()
+
+
+# --- Auto continue: the same account after its reset; a quota failure belongs to the account it happened on ----------
+CLAUDE = [dict(account, tool="claude") for account in ACCOUNTS]
+
+
+def continue_policy(accounts=("a",)):
+    from vibe_launcher.quota_policy import continue_template
+    return policy(account_ids=list(accounts), flow=continue_template())
+
+
+def status_line(identifier, used, checked=900, reset=1300):
+    """Claude's quota as its status line records it: no buckets, written only while the CLI runs."""
+    return {"tool": "claude", "account_id": identifier, "environment_id": "local", "checked_at": checked, "reached": None,
+            "windows": [{"slot": "five_hour", "used_percent": used, "window_minutes": 300, "resets_at": reset}]}
+
+
+def fail(bridge, at):
+    bridge.data.update(state="idle", can_switch=True, last_turn_status="failed", last_error_kind="usageLimitExceeded",
+                       last_error_at=at)
+
+
+@pytest.fixture
+def claude(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(runtime.time, "time", lambda: clock[0])
+    monkeypatch.setattr(runtime, "CodexQuotaMonitor", FakeMonitor)
+    bridge = FakeBridge()
+    controller = runtime.ManagedClaudeSession({"session_id": "session", "environment_id": "local",
+        "account": CLAUDE[0], "path": str(tmp_path)}, tmp_path, bridge)
+    controller.command(command("policy", policy=continue_policy().to_dict(), accounts=CLAUDE[:1]))
+    yield controller, bridge, clock
+    controller._closed.set()
+
+
+def test_claude_continues_by_itself_and_the_launcher_only_follows(claude):
+    controller, bridge, clock = claude
+    controller.monitor.values = {"a": status_line("a", 100)}             # written before the failure
+    fail(bridge, 1000)
+    result = controller.tick()
+    assert result["status"] == "waiting_quota" and controller.wait_reset == 1300
+    assert result["message"] == "Waiting for quota to recover; the task continues automatically."
+    clock[0] = 1302
+    bridge.data.update(state="running", can_switch=False)                # Claude Code's own continuation at the reset
+    result = controller.tick()
+    assert result["status"] == "running" and not controller.waiting and bridge.resumed == 0
+    bridge.data.update(state="idle", can_switch=True, last_turn_status="completed", last_error_kind=None,
+                       last_error_at=None)
+    clock[0] = 1400
+    assert controller.tick()["status"] == "idle" and not controller.waiting and bridge.resumed == 0
+
+
+def test_claude_that_did_not_continue_by_itself_is_left_to_the_user(claude):
+    controller, bridge, clock = claude
+    controller.monitor.values = {"a": status_line("a", 100)}
+    fail(bridge, 1000)
+    controller.tick()
+    clock[0] = 1300 + 119
+    controller.tick()
+    assert controller.waiting and controller.next_retry == 1300          # its own wait may still be on the way
+    clock[0] = 1300 + 121                                                # automatic continue off, cancelled or asleep
+    result = controller.tick()
+    assert result["status"] == "waiting_quota" and controller.next_retry is None
+    assert result["message"] == "Quota ran out; continue the task in the terminal when quota is available."
+    clock[0] = 5000
+    controller.tick()
+    assert bridge.resumed == 0                                           # the launcher never restarts Claude for it
+    bridge.data.update(state="running", can_switch=False)                # you continue
+    controller.tick()
+    assert not controller.waiting
+
+
+def test_claude_without_a_reported_reset_is_not_promised_to_continue(claude):
+    controller, bridge, clock = claude
+    fail(bridge, 1000)                                                   # no status line windows at all
+    result = controller.tick()
+    assert result["status"] == "waiting_quota" and controller.wait_reset is None
+    assert result["message"] == "Quota ran out; continue the task in the terminal when quota is available."
+    clock[0] = 100000
+    controller.tick()
+    assert bridge.resumed == 0 and controller.waiting
+
+
+def test_a_new_limit_after_a_continuation_waits_for_its_own_reset(claude):
+    controller, bridge, clock = claude
+    controller.monitor.values = {"a": status_line("a", 100)}
+    fail(bridge, 1000)
+    controller.tick()
+    clock[0] = 1301
+    bridge.data.update(state="running", can_switch=False)                # continued (by Claude Code or by you) ...
+    controller.tick()
+    controller.monitor.values = {"a": status_line("a", 100, checked=1340, reset=2000)}
+    fail(bridge, 1340)                                                   # ... and stopped by the limit again
+    clock[0] = 1345
+    controller.tick()
+    assert controller.waiting and controller.wait_reset == 2000 and bridge.resumed == 0
+
+
+def test_codex_auto_continue_resumes_only_after_a_query_made_after_the_reset(session):
+    controller, bridge, clock = session
+    controller.command(command("policy", policy=continue_policy().to_dict(), accounts=ACCOUNTS[:1]))
+    controller.monitor.values = {"a": quota("a", 100, checked=990)}
+    bridge.data.update(last_error_kind="usageLimitExceeded", last_error_at=1000, last_turn_status="failed")
+    assert controller.tick()["status"] == "waiting_quota" and controller.wait_reset == 1300
+    clock[0] = 1301
+    controller.tick()
+    assert bridge.resumed == 0                                           # nothing was asked after the reset yet
+    controller.monitor.values = {"a": quota("a", 10, checked=1302)}
+    clock[0] = 1303
+    controller.tick()
+    assert bridge.resumed == 1 and bridge.recovered is True and not controller.waiting
+    clock[0] = 1320
+    controller.tick()
+    assert bridge.resumed == 1 and not controller.waiting                # the continued failure is over
+
+
+def test_a_handoff_ends_the_old_accounts_quota_failure(session):
+    controller, bridge, clock = session
+    controller.command(command("policy", policy=policy().to_dict(), accounts=ACCOUNTS))
+    controller.monitor.values = {"a": quota("a", 100, checked=990), "b": quota("b", 20, checked=990)}
+    bridge.data.update(last_error_kind="usageLimitExceeded", last_error_at=1000, last_turn_status="failed")
+    controller.tick()                                                    # a ran out: hand off to b and continue there
+    assert bridge.switched == ["b"] and bridge.resumed == 1
+    clock[0] = 1010
+    controller.tick()                                                    # b is fine; a's failure is not b's
+    assert not controller.waiting and bridge.data["pending_account"] is None and bridge.switched == ["b"]

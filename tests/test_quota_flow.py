@@ -1,4 +1,4 @@
-"""Block workflows: validation, evaluation, the three templates and new-work account selection."""
+"""Block workflows: validation, evaluation, the templates and new-work account selection."""
 import copy
 import json
 
@@ -62,6 +62,46 @@ def test_every_flow_problem_is_reported(change, expected):
     assert codes(flow(*edges, **nodes)) == []
     change(nodes, edges)
     assert codes(flow(*edges, **nodes)) == expected
+
+
+SAME = dict(start=("start", {}), out=("condition", {"test": "exhausted"}), wait=("wait", {}), keep=("keep", {}))
+SAME_EDGES = [("start", "next", "out"), ("out", "yes", "wait"), ("out", "no", "keep")]
+
+
+def test_a_flow_without_account_selection_needs_no_safe_handoff():
+    same = flow(*SAME_EDGES, **SAME)
+    assert codes(same) == []
+    assert runtime.flow_outcome(same, {"exhausted": True}.get, lambda *args: None) == ("wait", None)
+    assert runtime.flow_outcome(same, {"exhausted": False}.get, lambda *args: None) == ("keep", None)
+    assert codes(flow(*SAME_EDGES, **dict(SAME, handoff=("handoff", {})))) == ["handoff"]    # nothing can reach it
+    assert codes(flow(*GOOD_EDGES, **dict(GOOD, again=("handoff", {})))) == ["handoff"]       # only one handoff
+
+
+def test_the_template_of_auto_continue_is_valid_and_switches_nothing():
+    from vibe_launcher.quota_policy import AUTO_CONTINUE, TEMPLATES, template_plan
+    assert AUTO_CONTINUE not in TEMPLATES                       # the switching templates keep their strategy names
+    plan = template_plan("p", "Auto", AUTO_CONTINUE, "local", POOL)
+    assert runtime.flow_issues(plan.flow, plan.account_ids) == [] and plan.strategy == "priority"
+    assert {node["type"] for node in plan.flow["nodes"]} == {"start", "condition", "wait", "keep"}
+    assert runtime.flow_outcome(plan.flow, {"exhausted": True}.get, lambda *args: "b") == ("wait", None)
+    with pytest.raises(ValueError):
+        template_plan("p", "Bad", "auto-switch", "local", POOL)
+
+
+@pytest.mark.parametrize("kind, branch, target, same, expected", [
+    ("condition", "yes", "wait", False, None),
+    ("select", "found", "handoff", False, None),
+    ("select", "none", "notify", False, None),
+    ("select", "found", "wait", False, "handoff"),          # a found account goes through the safe handoff ...
+    ("condition", "no", "handoff", False, "handoff"),       # ... and nothing else does
+    ("condition", "found", "keep", False, "edge"),          # not a branch of a condition
+    ("wait", "next", "keep", False, "edge"),                # an outcome ends the plan
+    ("condition", "yes", "start", False, "edge"),           # the quota check is only a start
+    ("condition", "yes", "condition", True, "edge"),        # itself
+    ("condition", "yes", "script", False, "edge"),
+])
+def test_each_connection_is_judged_by_one_rule(kind, branch, target, same, expected):
+    assert runtime.flow_link_issue(kind, branch, target, same) == expected
 
 
 def test_cycles_are_rejected_and_waiting_is_a_state():

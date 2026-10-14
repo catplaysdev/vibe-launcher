@@ -56,7 +56,9 @@ def test_transport_cache_integrity_feature_dependencies_and_length_gate():
     _compressed_runtime(source, 'cli')
     assert _compressed_runtime.cache_info().hits == 1
     with pytest.raises(ValueError, match='長度'):
-        remote_command({'action': 'doctor', 'path': 'a' * 30000})
+        # Incompressible: the compact transport compresses the request, so repetition alone no longer overflows.
+        remote_command({'action': 'doctor', 'path': ''.join(__import__('hashlib').sha256(bytes([i % 256, i // 256])).hexdigest()
+                                                            for i in range(2000))})
 
 
 def test_poll_unchanged_skips_render_and_failure_visible(tmp_path, qtbot, monkeypatch):

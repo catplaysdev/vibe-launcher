@@ -114,9 +114,13 @@ size, `Ctrl+Shift+Space` keyboard navigation. All shortcuts can be changed in **
 - **Integrations**: GitHub account and commit identity per project (official `gh`), Codex quota view,
   DeepSeek Harness Web (experimental).
 - **Quota plans**: separate usage buckets, environment-specific account pools and saved plans built from blocks
-  (three templates: take over in order, rotate accounts, most quota first; conditions, waits and notifications wired
-  with the mouse or keyboard, checked before saving, previewed without starting work). Terminals have no plan until
-  one is applied. A Codex terminal can switch accounts from its toolbar: the
+  (four templates: take over in order, rotate accounts, most quota first, and auto continue on the same account;
+  colour-coded trigger, check, account and outcome blocks wired left to right with the mouse or keyboard, only allowed
+  connections offered, tidy layout, checked before saving, previewed without starting work). Before a plan is saved or applied, its local
+  accounts are checked: settings and approval rules can be aligned to a reference account, and missing plugins, apps
+  or MCP sign-ins are installed or accepted one by one. Auto continue waits for
+  the quota reset and then continues the task that stopped on quota (Codex after a fresh quota check; Claude through Claude Code's own
+  "Continue automatically at usage limit", which Launcher never interrupts). Terminals have no plan until one is applied. A Codex terminal can switch accounts from its toolbar: the
   exact conversation and its settings move at a verified safe point, and a task stopped by quota continues. Verified
   with real local accounts; Claude Code terminals switch the same way by resuming the exact conversation. SSH hosts are not yet
   verified. See the [guide](docs/guide.zh-TW.md) and the [issue table](docs/account-switching-issues.zh-TW.md).
