@@ -24,7 +24,7 @@
 ```powershell
 $env:QT_QPA_PLATFORM = 'offscreen'
 $env:QT_QPA_FONTDIR = 'C:/Windows/Fonts'
-.venv/Scripts/python.exe -m pytest tests/test_quota.py tests/test_quota_policy.py tests/test_quota_policy_dialog.py tests/test_codex_control.py -q --basetemp="$env:TEMP/vibe-quota-acceptance" -p no:cacheprovider -o faulthandler_timeout=90
+.venv/Scripts/python.exe -m pytest tests/test_quota.py tests/test_quota_ui.py tests/test_managed.py -q --basetemp="$env:TEMP/vibe-quota-acceptance" -p no:cacheprovider -o faulthandler_timeout=90
 .venv/Scripts/python.exe scripts/check_translations.py
 ```
 

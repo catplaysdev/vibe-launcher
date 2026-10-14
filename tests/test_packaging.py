@@ -1,16 +1,22 @@
-"""A packaged build starts its own helpers and updates itself through GitHub Releases; both must stay testable from source."""
+"""Packaging, releases and the branch rules.
+
+- packaging: A packaged build starts its own helpers and updates itself through GitHub Releases; both must stay testable from source.
+- branch rules: The pre-push hook keeps work branches (feat/dev_*, fix_*) on this computer; only main, develop, hotfix and tags go out.
+"""
 import hashlib
 import io
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-
 from vibe_launcher import entry, runtime, selfcmd, updates
 
+
+# --- packaging --------------------------------------------------------------------------------------------------------
 SRC = Path(__file__).resolve().parents[1] / "src" / "vibe_launcher"
 
 
@@ -235,7 +241,7 @@ def test_installer_file_names_agree_between_the_script_the_pipeline_and_the_upda
     assert "OutputBaseFilename=Vibe-Launcher-Setup-{#AppVersion}" in iss and "Vibe-Launcher-Setup-*.exe" in flow
     assert updates.SUMS_NAME in flow and updates.SUMS_NAME in build
     assert "PrivilegesRequired=lowest" in iss and "CloseApplications=yes" in iss, "the silent update needs no administrator"
-    assert 'Name: "{app}\_internal"' in iss and "[InstallDelete]" in iss, "an update must not leave the old version's metadata behind"
+    assert r'Name: "{app}\_internal"' in iss and "[InstallDelete]" in iss, "an update must not leave the old version's metadata behind"
     spec = (root / "packaging" / "vibe-launcher.spec").read_text(encoding="utf-8")
     assert "upx=False" in spec and "console=False" in spec and "console=True" in spec and "runtime.py" in spec
     assert "collect_all" not in spec, "collect only what the launcher imports; the build must stay small"
@@ -374,3 +380,33 @@ def test_both_update_screens_show_system_selected_notes(qapp, qtbot, tmp_path, m
         qtbot.addWidget(widget)
         texts = [label.text() for label in widget.findChildren(QLabel)]
         assert "• English notes" in texts and "• 中文資訊" not in texts
+
+
+# --- branch rules -----------------------------------------------------------------------------------------------------
+HOOK = Path(__file__).resolve().parents[1] / ".githooks" / "pre-push"
+ZERO, SHA = "0" * 40, "1" * 40
+SH = shutil.which("sh")
+
+
+def push(remote_ref: str, local_sha: str = SHA) -> int:
+    line = f"refs/heads/x {local_sha} {remote_ref} {ZERO}\n"
+    return subprocess.run([SH, str(HOOK), "origin", "url"], input=line, capture_output=True, text=True).returncode
+
+
+@pytest.mark.skipif(SH is None, reason="needs a POSIX shell (Git for Windows ships one)")
+@pytest.mark.parametrize("ref,allowed", [
+    ("refs/heads/main", True), ("refs/heads/develop", True), ("refs/heads/hotfix", True), ("refs/tags/v1.2.3", True),
+    ("refs/heads/feat/dev_workspace_restore", False), ("refs/heads/fix_runtime_sync1", False),
+    ("refs/heads/feat/anything", False), ("refs/tags/nightly", False),
+])
+def test_only_shared_branches_and_version_tags_are_pushed(ref, allowed):
+    assert (push(ref) == 0) is allowed
+
+
+@pytest.mark.skipif(SH is None, reason="needs a POSIX shell (Git for Windows ships one)")
+def test_removing_a_stray_remote_branch_is_allowed():
+    assert push("refs/heads/feat/old", local_sha=ZERO) == 0
+
+
+def test_the_hook_keeps_unix_line_endings():
+    assert b"\r" not in HOOK.read_bytes()

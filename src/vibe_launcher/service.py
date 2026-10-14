@@ -42,7 +42,7 @@ HISTORY_ONLY = {"_copy_transcripts", "sync_history", "_same_project_path", "_cod
 SHARED_GITHUB = {"github_env", "github_session_env", "github_author", "github_helper"}
 
 # Each remote helper ships only the code its action reaches, so every command stays under the Windows command-line
-# limit. SSH hosts are never Windows. tests/test_production_integration.py runs every feature's own path on the shipped
+# limit. SSH hosts are never Windows. tests/test_runtime.py runs every feature's own path on the shipped
 # module, so a missing definition fails there and not on a server.
 WINDOWS_ONLY = {"windows_secret", "windows_user_sid", "windows_process_alive"}
 # The managed Codex terminal: the launcher-owned app-server bridge, its controller and the quota monitor.
