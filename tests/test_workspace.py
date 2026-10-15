@@ -227,19 +227,104 @@ def test_a_shell_launch_skips_authentication_and_runs_the_shell(tmp_path, monkey
     assert "VIBE_SSH_ID" not in kw["env"]
 
 
-def test_tmux_sessions_tell_the_app_when_attached_and_accept_ctrl_b(tmp_path, monkeypatch):
+class FakeTmux:
+    """A tmux that knows windows, their @vibe-session marks and sessions, enough for the launch/attach/stop paths."""
+
+    def __init__(self, version=b"tmux 3.6"):
+        self.calls, self.windows, self.next, self.version = [], {}, 1, version
+
+    def __call__(self, *args, capture=False):
+        self.calls.append(args)
+        if args[0] == "-V":
+            return subprocess.CompletedProcess(args, 0, self.version + b"\n", b"")
+        if args[0] in {"new-window", "new-session"}:
+            window, self.next = f"@{self.next}", self.next + 1
+            self.windows[window] = ""
+            return subprocess.CompletedProcess(args, 0, (window + "\n").encode(), b"")
+        if args[0] == "set-option" and "-w" in args and "@vibe-session" in args:
+            self.windows[args[args.index("-t") + 1]] = args[-1]
+        if args[0] == "kill-window":
+            self.windows.pop(args[-1], None)
+        if args[0] == "list-windows":
+            lines = "".join(f"{w} {s}\n" for w, s in self.windows.items())
+            return subprocess.CompletedProcess(args, 0, lines.encode(), b"")
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+
+def launch_with_fake_tmux(tmp_path, monkeypatch, version=b"tmux 3.6", **extra):
     monkeypatch.setattr(runtime, "WINDOWS", False)
     monkeypatch.setattr(runtime, "doctor", lambda *a: None)
     monkeypatch.setattr(runtime, "emit", lambda *a: None)
     monkeypatch.setattr(runtime, "authenticate", lambda *a, **k: {})
-    calls = []
-    monkeypatch.setattr(runtime, "tmux", lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0))
-    monkeypatch.setattr(runtime, "tmux_session_exists", lambda *_: True)
-    request = {"action": "launch", "account": ACCOUNT, "session_id": "s", "environment_id": "host", "path": str(tmp_path)}
+    monkeypatch.setattr(runtime, "trusted_executable", lambda name: "/usr/bin/" + name)
+    fake = FakeTmux(version)
+    monkeypatch.setattr(runtime, "tmux", fake)
+    request = {"action": "launch", "account": ACCOUNT, "session_id": "s", "environment_id": "host", "path": str(tmp_path),
+               "nonce": "abcdef0123", **extra}
     runtime.perform(request, tmp_path / "state")
-    options = [c for c in calls if c[0] == "set-option"]
+    return fake
+
+
+def test_terminals_of_one_workspace_are_windows_of_its_tmux_session(tmp_path, monkeypatch):
+    fake = launch_with_fake_tmux(tmp_path, monkeypatch, workspace_id="ws1")
+    created = fake.calls[0]
+    assert created[0] == "new-window" and created[created.index("-t") + 1] == "=vibe-ws-ws1:"
+    assert created[created.index("-n") + 1] == tmp_path.name + " · codex"
+    # the workspace session did not exist yet (the fake still answers), then the window is marked as this terminal's
+    assert ("set-option", "-w", "-t", "@1", "@vibe-session", "s") in fake.calls
+    assert not any(c[0] == "new-session" and "-s" in c and c[c.index("-s") + 1] == "vibe-s" for c in fake.calls)
+
+
+def test_a_workspace_session_is_created_when_its_first_terminal_starts(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, "WINDOWS", False)
+    fake = FakeTmux()
+    original = fake.__call__
+
+    def missing_group(*args, capture=False):
+        if args[0] == "new-window" and not fake.windows:
+            fake.calls.append(args)
+            return subprocess.CompletedProcess(args, 1, b"", b"can't find session: vibe-ws-default")
+        return original(*args, capture=capture)
+    monkeypatch.setattr(runtime, "tmux", missing_group)
+    assert runtime.tmux_new_window("vibe-ws-default", "p · codex", "/w", "worker") == "@1"
+    assert [c[0] for c in fake.calls] == ["new-window", "new-session"]
+    assert fake.calls[1][fake.calls[1].index("-s") + 1] == "vibe-ws-default"
+
+
+def test_tmux_sessions_tell_the_app_when_attached_and_accept_ctrl_b(tmp_path, monkeypatch):
+    fake = launch_with_fake_tmux(tmp_path, monkeypatch)
+    view = "vibe-s-abcdef01"
+    assert ("link-window", "-a", "-s", "@1", "-t", "=" + view + ":") in fake.calls
+    assert ("set-option", "-s", "focus-events", "on") in fake.calls       # the launcher's own tmux server only
+    options = [c for c in fake.calls if c[0] == "set-option" and "-w" not in c and "-s" not in c]
     assert any("prefix2" in c and "C-b" in c for c in options)
     assert any("set-titles-string" in c and "vibe:#S" in c for c in options)
+    # set-option takes a pane target: tmux answers "no such session" for "=name" and only matches "=name:" exactly.
+    assert options and all(c[c.index("-t") + 1] == "=" + view + ":" for c in options)
+    # the view disappears when the tab leaves; the option is set only once attached (earlier, tmux destroys it at once)
+    attach = next(c for c in fake.calls if c[0] == "attach-session")
+    assert attach == ("attach-session", "-t", "=" + view, ";", "set-option", "-t", "=" + view + ":", "destroy-unattached", "on")
+    assert ("kill-window", "-t", "@2") in fake.calls          # the placeholder the view was opened on goes at once
+
+
+def test_older_tmux_attaches_on_a_placeholder_that_takes_the_terminals_late_answer(tmp_path, monkeypatch):
+    # tmux 3.4 types the terminal's answer to its device-attributes query ("61;6;7;...c") into the window
+    fake = launch_with_fake_tmux(tmp_path, monkeypatch, version=b"tmux 3.4")
+    view = "vibe-s-abcdef01"
+    assert ("link-window", "-a", "-d", "-s", "@1", "-t", "=" + view + ":") in fake.calls     # the placeholder stays shown
+    assert ("kill-window", "-t", "@2") not in fake.calls
+    attach = next(c for c in fake.calls if c[0] == "attach-session")
+    assert attach[-4:-1] == (";", "run-shell", "-b")
+    assert attach[-1] == "sleep 1; /usr/bin/tmux -L vibe-launcher kill-window -t @2"
+
+
+def test_stop_kills_only_the_terminals_window(tmp_path, monkeypatch):
+    fake = launch_with_fake_tmux(tmp_path, monkeypatch, workspace_id="ws1")
+    fake.windows["@9"] = "other"
+    runtime.perform({"action": "stop", "session_id": "s", "environment_id": "host"}, tmp_path / "state")
+    assert ("kill-window", "-t", "@1") in fake.calls
+    assert not any(c[0] == "kill-session" and "vibe-ws" in " ".join(c) for c in fake.calls)
+    assert fake.windows == {"@9": "other"}
 
 
 # ----------------------------------------------------------------------------- the page
@@ -603,7 +688,8 @@ def test_workspace_slots_capture_only_reopenable_terminals(page):
     open_tab(page, session="a1")
     open_tab(page, mode="shell", account="", session="a2")
     page.spawn(["python"], {"action": "login", "account_id": "a", "environment_id": "srv"})
-    assert page.slots() == [{"preset_id": "p1", "kind": "agent", "account_id": "a", "environment_id": "srv"},
+    # A Codex terminal also keeps its session: reopening it finds its exact conversation and saved quota flow.
+    assert page.slots() == [{"preset_id": "p1", "kind": "agent", "account_id": "a", "environment_id": "srv", "session_id": "a1"},
                             {"preset_id": "p1", "kind": "shell", "environment_id": "srv"}]
 
 
@@ -795,6 +881,22 @@ def test_repeated_open_and_attach_do_not_create_more_sessions(window):
     view.open_workspace("one")
     assert len(service.calls) == 1
     assert view.workspace.workspace_id == "one"
+
+
+def test_launches_name_the_workspace_whose_tmux_session_they_join(window, qtbot):
+    view, store, service = window
+    view.open_terminal("p1", "shell")
+    default_id = service.calls[-1][1]["workspace_id"]
+    assert re.fullmatch(r"[0-9a-f]{32}", default_id)
+    store.save("workspaces", {"id": "two", "name": "Two", "slots": []})
+    view.reload()
+    view.open_workspace("two")
+    view.open_terminal("p2", "shell")
+    assert service.calls[-1][1]["workspace_id"] == "two"
+    # the default desktop keeps its id across restarts, so its terminals are found in the same tmux session again
+    again = MainWindow(store, SpawnService(), terminal_factory=FakeTerminal)
+    qtbot.addWidget(again, before_close_func=lambda w: w.workspace.shutdown())
+    assert again.prefs.default_workspace_id == default_id
 
 
 def test_background_desktop_closes_only_its_own_terminal(window):
@@ -1356,6 +1458,20 @@ def test_reload_of_a_tmux_terminal_reattaches(window, monkeypatch):
     assert service.calls[0][0] == "attach" and service.calls[0][1]["session_id"] == tab.info.session_id
 
 
+def test_reload_of_a_tmux_terminal_whose_cli_ended_starts_the_conversation_again(window, monkeypatch):
+    """Ctrl+C ended the CLI and with it the tmux session: attaching would fail, so the conversation is resumed instead."""
+    view, store, service = window
+    view.open_terminal("p1", "agent")
+    tab = view.workspace.current_tabs()[0]
+    tab.info.tmux = True
+    tab.exit_code = 79
+    view.workspace._sessions[tab.info.session_id] = {"id": tab.info.session_id, "status": "ended"}
+    monkeypatch.setattr(view.workspace, "_confirm_skippable", lambda *a, **k: (True, False))
+    service.calls.clear()
+    view.workspace.reload_tab(tab.info.id)
+    assert service.calls[0][0] == "launch" and service.calls[0][1].get("resume") is True
+
+
 def test_desktops_are_saved_as_terminals_open_and_close(window):
     view, store, service = window
     store.save("workspaces", {"id": "one", "name": "One", "slots": []})
@@ -1533,3 +1649,55 @@ def test_a_reload_that_cannot_start_keeps_the_old_terminal(window, monkeypatch):
     service.fail = ValueError("Cannot start this terminal")
     view.reload_terminal(tab.info.id)
     assert view.workspace.current_tabs() == [tab] and tab.alive()
+
+
+def test_deleting_a_workspace_names_its_tmux_session_and_ends_it_on_each_server(window, monkeypatch):
+    view, store, service = window
+    store.save("workspaces", {"id": "two", "name": "Two", "slots": []})
+    store.save("sessions", {"id": "live", "name": "Web", "preset_id": "p1", "account_id": "a", "environment_id": "srv",
+                            "path": "/w/web", "status": "detached", "workspace_id": "two"})
+    store.save("sessions", {"id": "done", "name": "Web", "preset_id": "p1", "account_id": "a", "environment_id": "srv",
+                            "path": "/w/web", "status": "ended", "workspace_id": "two"})
+    view.reload()
+    asked = []
+    monkeypatch.setattr(view, "_confirm", lambda title, message, **k: asked.append(message) or True)
+    view.delete_workspace("two")
+    assert "vibe-ws-two" in asked[0] and "伺服器" in asked[0]
+    action, kwargs = service.calls[-1]
+    assert action == "stop" and kwargs["session_ids"] == ["live"] and kwargs["environment_id"] == "srv"
+    assert kwargs["workspace_id"] == "two"
+
+
+def test_a_workspace_without_server_terminals_is_deleted_with_the_plain_question(window, monkeypatch):
+    view, store, service = window
+    store.save("workspaces", {"id": "two", "name": "Two", "slots": []})
+    view.reload()
+    asked = []
+    monkeypatch.setattr(view, "_confirm", lambda title, message, **k: asked.append(message) or True)
+    view.delete_workspace("two")
+    assert "tmux" not in asked[0] and not service.calls
+
+
+def test_stopping_with_a_workspace_also_ends_its_tmux_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, "WINDOWS", False)
+    monkeypatch.setattr(runtime, "emit", lambda *a: None)
+    fake = FakeTmux()
+    monkeypatch.setattr(runtime, "tmux", fake)
+    runtime.perform({"action": "stop", "session_ids": ["s"], "session_id": "s", "environment_id": "host",
+                     "workspace_id": "ws1"}, tmp_path)
+    assert fake.calls[-1] == ("kill-session", "-t", "=vibe-ws-ws1")
+
+
+def test_a_server_launch_records_its_workspace_and_a_stop_carries_it(tmp_path):
+    from vibe_launcher.service import LauncherService
+    store = Store(tmp_path / "ws.db")
+    store.save("environments", {"id": "gpu", "name": "GPU", "kind": "ssh", "ssh_target": "gpu-lab"})
+    store.save("accounts", {"id": "a", "name": "A", "tool": "claude", "auth": "api", "model": "m"})
+    store.save("presets", {"id": "p", "name": "Site", "account_id": "a", "environment_id": "gpu", "path": "/w"})
+    service = LauncherService(store)
+    session_id = service.start("launch", preset_id="p", account_id="a", workspace_id="ws1", spawn=lambda *a: None)
+    assert store.get("sessions", session_id)["workspace_id"] == "ws1"
+    service.start("stop", session_ids=[session_id], workspace_id="ws1", spawn=lambda *a: None)
+    jobs = sorted((tmp_path / "jobs").glob("*.json"), key=lambda path: path.stat().st_mtime_ns)
+    request = json.loads(runtime.read_private(jobs[-1]))["request"]
+    assert request["action"] == "stop" and request["workspace_id"] == "ws1"

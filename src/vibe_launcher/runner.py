@@ -27,6 +27,7 @@ TRANSITIONS = {
 # Exit statuses the remote supervisor uses to report how an interactive session ended (see runtime.session_outcome).
 SESSION_EXITS = {runtime.EXIT_SESSION_ENDED: "ended", runtime.EXIT_SESSION_DETACHED: "detached",
                  runtime.EXIT_SESSION_FAILED: "failed"}
+SSH_FAILED = 255     # ssh's own status when it cannot connect or authenticate
 SESSION_EXIT_NOTES = {
     "ended": "Session ended.",
     "detached": "Session is still running in the background. Use Attach to reconnect.",
@@ -258,10 +259,15 @@ def run_remote(store: Store, request: dict, environment: dict) -> int:
     authenticated = False
     cancelled = False
     process = None
+    # A launched or attached CLI only reports through its exit status, and ssh must write to the terminal itself:
+    # Windows ssh reads the window size (and each resize) from its stdout console, so through a pipe the server
+    # gets no size and tmux draws for 80x24.
+    terminal_session = request["action"] in {"launch", "attach"}
     try:
-        process = subprocess.Popen(ssh_args(environment["ssh_target"], request, root=store.path.parent, environment=environment), stdout=subprocess.PIPE,
+        process = subprocess.Popen(ssh_args(environment["ssh_target"], request, root=store.path.parent, environment=environment),
+                                   stdout=None if terminal_session else subprocess.PIPE,
                                    **({"env": auth_env} if auth_env is not None else {}))
-        while chunk := process.stdout.read1(4096):
+        while not terminal_session and (chunk := process.stdout.read1(4096)):
             if not authenticated:
                 # stdout is the established remote channel, not SSH's local auth
                 # prompts/banner (stderr). Only now may a pending password persist.
@@ -301,6 +307,11 @@ def run_remote(store: Store, request: dict, environment: dict) -> int:
                         pass
             pending = pending[-65536:]
         code = process.wait()
+        if terminal_session and code != SSH_FAILED:
+            # ssh exits 255 when it cannot connect or authenticate; any other status came from the server.
+            if auth_env:
+                askpass.password_operation(auth_env, promote=True)
+            authenticated = True
         outcome = SESSION_EXITS.get(code) if request["action"] in {"launch", "attach"} else None
         if outcome:
             record_event(store, request, {"status": outcome})
