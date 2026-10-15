@@ -64,3 +64,12 @@ def no_automatic_update_checks(monkeypatch):
     """The window looks for new versions with git in the background; tests never reach the network."""
     from vibe_launcher import ui
     monkeypatch.setattr(ui.VibeLauncherWindow, "UPDATE_AUTOCHECK", False)
+
+
+@pytest.fixture(autouse=True)
+def no_real_managed_codex(monkeypatch):
+    """Worker tests run stand-in CLIs: the installed Codex must not be probed or started behind them. Tests of the
+    managed path patch this seam back explicitly."""
+    from vibe_launcher import runtime
+    monkeypatch.setattr(runtime, "managed_codex_supported", lambda *args: False)
+    monkeypatch.setattr(runtime, "managed_claude_supported", lambda *args: False)

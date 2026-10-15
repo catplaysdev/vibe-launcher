@@ -715,6 +715,8 @@ class EnvironmentsPage(QWidget):
         filter_row.addWidget(self.filters, 1)
         column.addLayout(filter_row)
         self.environments_list = CardList()
+        self.environments_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.environments_list.customContextMenuRequested.connect(self._list_menu)
         self.environments_list.currentItemChanged.connect(self._current_changed)
         self.environments_list.itemClicked.connect(self._item_clicked)
         self.environments_list.itemActivated.connect(self._item_activated)
@@ -953,6 +955,15 @@ class EnvironmentsPage(QWidget):
         self.select(env_id)
         self._show_menu(self._env_actions(self._states[env_id]), anchor)
 
+    def _list_menu(self, pos) -> None:
+        """Right-click on an environment: the same menu as its "more" button, at the pointer."""
+        item = self.environments_list.itemAt(pos)
+        env_id = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if env_id not in self._states:
+            return
+        self.select(env_id)
+        self._show_menu(self._env_actions(self._states[env_id]), self.environments_list.viewport().mapToGlobal(pos))
+
     def _detail_menu(self, payload) -> None:
         if isinstance(payload, tuple):
             _, anchor = payload
@@ -984,12 +995,15 @@ class EnvironmentsPage(QWidget):
                                   enabled=not state.builtin, separator_before=True))
         return actions
 
-    def _show_menu(self, actions: list[MenuAction], anchor: QWidget) -> None:
+    def _show_menu(self, actions: list[MenuAction], anchor) -> None:
         menu = ActionMenu(actions, self.window())
         menu.about_to_show.connect(self._menu_shown)
         menu.about_to_hide.connect(self._menu_hidden)
         self._open_menu = menu
-        menu.popup_below(anchor)
+        if isinstance(anchor, QWidget):
+            menu.popup_below(anchor)
+        else:
+            menu.popup_at(anchor)              # a point: right-click
 
     def _menu_shown(self) -> None:
         self._menu_depth += 1

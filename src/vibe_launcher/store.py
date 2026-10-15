@@ -58,7 +58,7 @@ _FIELDS: dict[str, set[str]] = {
     "presets": {"id", "name", "account_id", "environment_id", "path", "favorite", "last_used", "persistent", "ask_account", "tags", "github_account_id", "github_repo", "github_remote", "github_branch", "github_access"},
     "sessions": {
         "id", "preset_id", "account_id", "environment_id", "name", "path", "status",
-        "updated_at", "pid", "runtime_id", "persistent", "runner_pid", "mode", "terminal_profile",
+        "updated_at", "pid", "runtime_id", "persistent", "runner_pid", "mode", "terminal_profile", "workspace_id",
     },
     "workspaces": {"id", "name", "layout", "slots"},
     "auth_states": {"id", "status", "checked_at"},
@@ -318,12 +318,12 @@ class Store:
                 raise ValueError("a workspace holds up to 16 terminals")
             clean_slots = []
             for slot in result["slots"]:
-                if not isinstance(slot, dict) or slot.keys() - {"preset_id", "kind", "account_id", "environment_id", "terminal_profile"}:
+                if not isinstance(slot, dict) or slot.keys() - {"preset_id", "kind", "account_id", "environment_id", "terminal_profile", "session_id"}:
                     raise ValueError("Invalid workspace terminal")
                 if slot.get("kind", "agent") not in {"agent", "shell"}:
                     raise ValueError("terminal kind must be agent or shell")
                 cleaned = {"preset_id": slot.get("preset_id"), "kind": slot.get("kind", "agent")}
-                for key in ("preset_id", "account_id", "environment_id", "terminal_profile"):
+                for key in ("preset_id", "account_id", "environment_id", "terminal_profile", "session_id"):
                     value = slot.get(key, "")
                     if not isinstance(value, str) or (value and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value)):
                         raise ValueError(f"Invalid workspace {key}")

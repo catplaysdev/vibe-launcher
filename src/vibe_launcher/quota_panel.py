@@ -183,9 +183,35 @@ class QuotaPanel(Section):
                 dispose_widget(item.widget())
 
     def _render_report(self, report: dict[str, Any]) -> None:
+        facts = []
+        buckets = report.get("buckets")
+        if isinstance(buckets, dict) and buckets:
+            for limit_id, bucket in buckets.items():
+                bucket_name = ""
+                if len(buckets) > 1 or limit_id != "codex":
+                    name = bucket.get("name")
+                    bucket_name = f"{name} ({limit_id})" if name and name != limit_id else limit_id
+                    heading = label(bucket_name, "body", wrap=True)
+                    heading.setTextFormat(Qt.TextFormat.PlainText)
+                    self.rows.addWidget(heading)
+                facts.extend(self._render_bucket(bucket, bucket_name))
+        else:
+            facts.extend(self._render_bucket(report))
+        if report.get("plan"):
+            facts.insert(0, tr('quota_panel.ad6de16c7ffe') + PLANS.get(report["plan"], str(report["plan"])))
+        if report.get("reset_credits"):
+            facts.append(tr('quota_panel.55f2426ad3f1', v0=f"{report['reset_credits']}"))
+        stamp = checked_text(report.get("checked_at"))
+        if stamp:
+            facts.append(stamp)
+        if facts:
+            self.rows.addWidget(label(" · ".join(facts), "meta", wrap=True))
+
+    def _render_bucket(self, report: dict[str, Any], bucket_name: str = "") -> list[str]:
         windows = report.get("windows") or []
         if not windows:
-            self.rows.addWidget(label(tr('quota_panel.d21633520309'), "muted", wrap=True))
+            self.rows.addWidget(label(tr('Usage limits not reported for this bucket.') if bucket_name
+                                      else tr('quota_panel.d21633520309'), "muted", wrap=True))
         for window in windows:
             used = float(window.get("used_percent", 0))
             block = QWidget()
@@ -202,24 +228,20 @@ class QuotaPanel(Section):
             column.addLayout(top)
             bar = UsageBar()
             bar.set_used(used)
-            bar.setAccessibleName(tr('quota_panel.ea202405770d', v0=f"{window_label(window.get('window_minutes'))}", v1=f'{used:g}'))
+            accessible = tr('quota_panel.ea202405770d', v0=f"{window_label(window.get('window_minutes'))}", v1=f'{used:g}')
+            bar.setAccessibleName(f"{bucket_name}: {accessible}" if bucket_name else accessible)
             column.addWidget(bar)
             column.addWidget(label(reset_text(window.get("resets_at")), "meta"))
             self.rows.addWidget(block)
         facts = []
-        if report.get("plan"):
-            facts.append(tr('quota_panel.ad6de16c7ffe') + PLANS.get(report["plan"], str(report["plan"])))
         credits = report.get("credits")
         if credits and credits.get("unlimited"):
             facts.append(tr('quota_panel.8f20a4d3a750'))
         elif credits and credits.get("has_credits") and credits.get("balance"):
             facts.append(tr('quota_panel.8465f26a3a04', v0=f"{credits['balance']}"))
-        if report.get("reset_credits"):
-            facts.append(tr('quota_panel.55f2426ad3f1', v0=f"{report['reset_credits']}"))
         if report.get("reached"):
             facts.append(tr('quota_panel.43db587ce0a2'))
-        stamp = checked_text(report.get("checked_at"))
-        if stamp:
-            facts.append(stamp)
-        if facts:
+        if facts and bucket_name:
             self.rows.addWidget(label(" · ".join(facts), "meta", wrap=True))
+            return []
+        return facts

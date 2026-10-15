@@ -98,6 +98,7 @@ from .workspace_page import DEFAULT_ICON_KEY, WORKSPACE_GLYPH, WorkspacePage
 from .ui_format import _display_time, _value
 from .ui_integrations import IntegrationActions
 from .ui_sessions import SessionActions
+from .ui_quota import QuotaActions
 
 # Projects page workspace filter values that are not desktop ids ("" is the default desktop; saved ids never contain "@").
 ALL_WORKSPACES = "@all"
@@ -349,7 +350,7 @@ def _surface(layout: QVBoxLayout | QHBoxLayout, margins: int = S.xl) -> QFrame:
     return frame
 
 
-class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
+class VibeLauncherWindow(SessionActions, IntegrationActions, QuotaActions, QMainWindow):
     PAGES = ("projects", "workspace", "accounts", "environments", "sessions", "home")   # Ctrl+1..5 keep their pages
     EMBEDDED_ACTIONS = {"launch", "attach", "login", "quota"}
     UPDATE_INTERVAL_MS = 6 * 3600 * 1000
@@ -662,6 +663,8 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         self.project_list = QListWidget()
         self.project_list.currentItemChanged.connect(self._project_selected)
         self.project_list.itemDoubleClicked.connect(lambda _: self.launch_project())
+        self.project_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.project_list.customContextMenuRequested.connect(self._project_context_menu)
         self.project_icon_click = ProjectIconClick(self.project_list)
         self.project_icon_click.clicked.connect(self._icon_clicked_in_list)
         empty = EmptyState()
@@ -765,12 +768,15 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         controls = FlowLayout(controls_host, S.sm, S.sm)
         controls.setContentsMargins(0, 0, 0, 0)
         self.account_buttons = {}
+        self.account_button_icons = {}
+        page.context_requested = self._account_context_menu
         for action, title, icon in (("login", tr('ui.aad60e6f37b3'), "key"), ("edit", tr('ui.e0d4485966bd'), "pencil"),
                                      ("status", tr('ui.5d8a776a2a79'), "refresh"), ("settings", tr('ui.f1b074e234fd'), "folder"),
                                      ("history", tr('ui.4f69b689ae8d'), "folder"), ("delete", tr('ui.8aa57065497d'), "trash")):
             button = make_button(title, "primary" if action == "login" else "secondary", icon,
                                  callback=lambda *_, action=action: page.request_action(action))
             self.account_buttons[action] = button
+            self.account_button_icons[action] = icon
             controls.addWidget(button)
         page.add_detail_widget(controls_host)
         return page
@@ -825,6 +831,8 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         self.session_hint.setWordWrap(True)
         root.addWidget(self.session_hint)
         root.addWidget(self.sessions_panel, 1)
+        self.sessions_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.sessions_list.customContextMenuRequested.connect(self._session_context_menu)
         self.sessions_list.currentItemChanged.connect(lambda *_: self._sync_session_actions())
         self.sessions_list.itemSelectionChanged.connect(self._sync_session_actions)
         self.auth_summary = QLabel()
@@ -853,6 +861,8 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         page.set_layout(self.prefs.workspace_layout)
         page.launch_requested.connect(self.open_terminal)
         page.history_refresh_requested.connect(self.refresh_project_history)
+        page.quota_policy_requested.connect(self.edit_terminal_quota)
+        page.account_switch_requested.connect(self.switch_terminal_account)
         page.palette_requested.connect(self.open_palette)
         page.notify.connect(lambda message, tone: self._toast(message, tone))
         page.save_workspace_requested.connect(self.save_workspace)
@@ -865,6 +875,7 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         page.delete_workspace_requested.connect(self.delete_workspace)
         page.layout_changed.connect(self._remember_layout)
         page.terminals_changed.connect(self._on_terminals_changed)
+        page.terminals_changed.connect(self._sync_quota_controls)
         page.restore_requested.connect(self.restore_project)
         page.launcher.set_tag_filter(self.prefs.workspace_tags)
         page.launcher.tags_changed.connect(self._workspace_tags_changed)
@@ -1014,9 +1025,15 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         order = [t.info.id for t in page.current_tabs()]
         position = order.index(tab_id) if tab_id in order else len(order)
         before = set(order)
-        reattach = bool(info.tmux and info.session_id)
+        # A tmux session the CLI itself ended (e.g. Ctrl+C) is gone: start the conversation again instead of attaching.
+        known = str(getattr(page, "_sessions", {}).get(info.session_id, {}).get("status", ""))
+        reattach = bool(info.tmux and info.session_id) and (tab.alive() or known not in {"ended", "failed"})
+        dropped = []
 
         def drop_old() -> None:
+            if dropped:
+                return
+            dropped.append(True)
             tab.closing = "close"
             if tab.alive():
                 tab.terminal.terminate()
@@ -1030,7 +1047,14 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         elif info.tool == "shell":
             self.open_terminal(info.preset_id, "shell", "", "", info.terminal_profile)
         else:
-            self.open_terminal(info.preset_id, "agent", info.account_id, "", resume=True)
+            managed = info.tool in {"codex", "claude"}
+            options = self._quota_launch_options(info.session_id, info.environment_id) if managed else {}
+            if managed and info.resume_thread_id:
+                options.setdefault("resume_thread_id", info.resume_thread_id)
+            if options.get("resume_thread_id"):
+                drop_old()                          # one writer per conversation: the old one ends before the new starts
+            self.open_terminal(info.preset_id, "agent", options.pop("account_id", "") or info.account_id, "", resume=True,
+                               **options)
         added = [t.info.id for t in page.current_tabs() if t.info.id not in before and t.info.id != tab_id]
         if not added:
             if reattach:                            # keep it in the desktop: Restore tries again
@@ -1045,6 +1069,8 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         if not reattach:
             drop_old()                              # only once the new terminal is there
         page.place_tab(added[0], position)
+        if not reattach and info.tool in {"codex", "claude"}:
+            self._carry_quota_policy(info.session_id, page.tab(added[0]).info.session_id)
 
     # -- which projects each desktop holds ----------------------------------------------------------------
     def _desktop_projects(self) -> dict[str, set[str]]:
@@ -1158,7 +1184,8 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         self._toast(tr('ui.d5c27b678f48') if self.prefs.external_terminal else tr('ui.e36caf8303b0'))
 
     def open_terminal(self, preset_id: str, kind: str = "agent", account_id: str = "", environment_id: str = "", terminal_profile: str = "",
-                      resume: bool = False) -> None:
+                      resume: bool = False, resume_thread_id: str = "", quota_policy: dict | None = None,
+                      quota_cursor: str = "") -> None:
         """Open a project in the workspace: its agent (Codex/Claude) or just an SSH shell, optionally on another account/host."""
         if not self._by_id("presets", preset_id):
             self._notice(tr('ui.ac9411e42933'))
@@ -1177,6 +1204,12 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
             kwargs["account_id"] = account_id
             if resume:
                 kwargs["resume"] = True      # restoring: continue the last conversation in this folder
+            if resume_thread_id:
+                kwargs["resume_thread_id"] = resume_thread_id      # the exact conversation, never "the latest"
+            if quota_policy:
+                kwargs["quota_policy"] = quota_policy              # the worker starts with the terminal's saved flow
+                if quota_cursor:
+                    kwargs["quota_cursor"] = quota_cursor          # ... and where its rotation stood
         if environment_id:
             kwargs["environment_id"] = environment_id
         self._invoke("launch", **kwargs)
@@ -1360,7 +1393,11 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
                     used_sessions.add(step.session["id"])
                     self._attach_step(step) if step.action == "attach" else self._relaunch(step.session)
                 else:
-                    self.open_terminal(slot["preset_id"], kind, account_id, "", slot.get("terminal_profile", ""), resume=True)
+                    options = self._quota_launch_options(slot.get("session_id", ""), project.get("environment_id", "local")) \
+                        if kind == "agent" else {}
+                    self.open_terminal(slot["preset_id"], kind, options.pop("account_id", "") or account_id, "",
+                                       slot.get("terminal_profile", ""), resume=True, **options)
+                    self._carry_quota_policy(slot.get("session_id", ""), getattr(self, "_last_launch_id", None))
                 if len(self.workspace.desktop_tabs(workspace_id)) > count:
                     opened += 1
                 else:
@@ -1377,12 +1414,35 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         if failed or skipped:
             self._remember_workspaces()         # no terminal changed, so record the cleaned-up arrangement now
 
+    def _workspace_servers(self, workspace_id: str) -> dict[str, list[str]]:
+        """Server environment id -> this workspace's terminals there that may still run in its tmux session."""
+        servers: dict[str, list[str]] = {}
+        ssh = {e["id"] for e in self._records.get("environments", []) if e.get("kind") == "ssh"}
+        for session in self._records.get("sessions", []):
+            if (session.get("workspace_id") == workspace_id and session.get("environment_id") in ssh
+                    and session.get("status") not in {"ended", "failed"}):
+                servers.setdefault(session["environment_id"], []).append(session["id"])
+        return servers
+
     def delete_workspace(self, workspace_id: str) -> None:
         workspace = self._by_id("workspaces", workspace_id)
-        if workspace and self._confirm(tr('ui.60f6d6ddd4c7'), tr('ui.be9189d66047', v0=f"{_value(workspace, 'name')}"),
-                                       confirm_text=tr('ui.3c8f5b363ab3'), danger=True):
+        if not workspace:
+            return
+        servers = self._workspace_servers(workspace_id)
+        name = _value(workspace, "name")
+        if servers:
+            hosts = ", ".join(sorted(_value(self._by_id("environments", env_id), "name") or env_id for env_id in servers))
+            message = tr("Delete workspace “{name}”? On {servers} its terminals run in the tmux session {session}. "
+                         "After deleting it, the launcher ends that tmux session there, with any work still running in "
+                         "it. Projects are not affected.", name=name, servers=hosts, session=runtime_module.tmux_group(workspace_id))
+        else:
+            message = tr('ui.be9189d66047', v0=f"{name}")
+        if self._confirm(tr('ui.60f6d6ddd4c7'), message, confirm_text=tr('ui.3c8f5b363ab3'), danger=True):
             if self._delete("workspaces", workspace_id):
                 self._incomplete_workspaces.discard(workspace_id)
+                for environment_id, session_ids in servers.items():
+                    # one SSH connection per server: stops the terminals and ends the workspace's tmux session
+                    self._invoke("stop", session_ids=session_ids[:100], environment_id=environment_id, workspace_id=workspace_id)
 
     def _render_workspace(self) -> None:
         if hasattr(self, "workspace"):
@@ -1542,6 +1602,50 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
     def _menu(self, anchor: QWidget, actions: list[MenuAction]) -> None:
         menu = ActionMenu(actions, self)
         menu.popup_below(anchor)
+
+    # -- right-click: the same actions as the page's buttons, at the pointer --------------------------------------
+    def _context_menu(self, actions: list[MenuAction], where: QPoint) -> None:
+        if actions:
+            ActionMenu(actions, self).popup_at(where)
+
+    def _account_context_menu(self, kind: str, record_id: str, where: QPoint) -> None:
+        self._refresh_account_details()
+        page = self.accounts_page
+        self._context_menu([MenuAction(button.text(), lambda action=action: page.request_action(action),
+                                       self.account_button_icons.get(action, ""), danger=action == "delete",
+                                       separator_before=action == "delete")
+                            for action, button in self.account_buttons.items() if not button.isHidden()], where)
+
+    def _project_context_menu(self, pos: QPoint) -> None:
+        item = self.project_list.itemAt(pos)
+        if item is None or not item.data(Qt.ItemDataRole.UserRole):
+            return
+        self.project_list.setCurrentItem(item)
+        where = self.project_list.viewport().mapToGlobal(pos)
+        self._context_menu([
+            MenuAction(tr('ui.0748e3c5fd75'), self.launch_project, "terminal"),
+            MenuAction(tr("Open in workspace…"), lambda: self._context_menu(self._open_in_workspace_actions(), where),
+                       WORKSPACE_GLYPH),
+            MenuAction(tr('ui.9f7cfab95388'), self.open_shell, "square-terminal"),
+            MenuAction(tr('ui.391babf73637'), self.attach_project, "activity"),
+            MenuAction(tr('ui.61bb06719113'), self.toggle_favorite, "star", separator_before=True),
+            MenuAction(tr('ui.6a51e329699a'), self.edit_project, "pencil"),
+            MenuAction(tr("Change icon…"), self.change_project_icon, "palette"),
+            MenuAction(tr('ui.9b9fe0d469be'), self.delete_project, "trash", danger=True, separator_before=True)], where)
+
+    def _session_context_menu(self, pos: QPoint) -> None:
+        item = self.sessions_list.itemAt(pos)
+        if item is None or not item.data(Qt.ItemDataRole.UserRole):
+            return
+        if not item.isSelected():
+            self.sessions_list.setCurrentItem(item)        # right-click inside a multi-selection keeps it
+        self._sync_session_actions()
+        buttons = ((self.session_attach_button, self.attach_session, "terminal"),
+                   (self.session_stop_button, self.stop_session, "x-circle"),
+                   (self.session_remove_button, self.remove_session, "trash"))
+        self._context_menu([MenuAction(button.text(), callback, icon, enabled=button.isEnabled(),
+                                       danger=callback == self.stop_session)
+                            for button, callback, icon in buttons], self.sessions_list.viewport().mapToGlobal(pos))
 
     # -- command palette -----------------------------------------------------------------------
     def open_palette(self) -> None:
@@ -2089,8 +2193,12 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
                 return False
             kwargs["account_id"] = account["id"]
             kwargs["resume"] = True           # bring the conversation back, not just the program
+            if runtime_module.switch_supported(account):
+                options = self._quota_launch_options(session["id"], kwargs["environment_id"])
+                kwargs.update(options)        # its exact conversation, last account and saved flow
         if not self._invoke("launch", **kwargs):
             return False
+        self._carry_quota_policy(session["id"], getattr(self, "_last_launch_id", None))
         try:
             self.store.delete("sessions", session["id"])      # the new record takes its place
         except KeyError:
@@ -2842,7 +2950,7 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
             runtime_module.assert_private_path(self.store.path.parent / "diagnostics" / ("launcher.log." + str(index)))
         logger.warning("%s: %s", operation, type(error).__name__)
 
-    def _start_operation(self, action: str, kwargs: dict, callback) -> None:
+    def _start_operation(self, action: str, kwargs: dict, callback, *, quiet: bool = False) -> None:
         try:
             operation_id = self.service.start(action, **kwargs, spawn=self.workspace.spawn if self._embedded_enabled() else None)
             if not operation_id:
@@ -2852,7 +2960,8 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
                                               "embedded": self._embedded_enabled()}
             if self._operations[operation_id]["login"] and self._operations[operation_id]["embedded"]:
                 self.show_page("workspace")
-            self._toast(tr('ui.aa0e08683b0b'))
+            if not quiet:
+                self._toast(tr('ui.aa0e08683b0b'))
         except Exception as exc:
             self._error(tr('ui.6b46dba7af51'), exc)
             callback({"status": "failed", "error": str(exc) if isinstance(exc, (ValueError, RuntimeError)) else type(exc).__name__})
@@ -2911,12 +3020,16 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
     # ------------------------------------------------------------------ service plumbing
     # -- account quota ---------------------------------------------------------------------------
     def _invoke(self, action: str, **kwargs: Any) -> bool:
+        if action == "launch":
+            self._last_launch_id = None             # set again only by a launch that really starts
         if action == "attach":
             tab = next((tab for tab in self.workspace.tabs() if tab.alive() and not tab.closing
                         and tab.info.session_id == kwargs.get("session_id")), None)
             if tab:
                 self._work_switch(tab.info.id)
                 return self.workspace.selected_id() == tab.info.id
+        if action == "launch" and hasattr(self, "workspace") and "workspace_id" not in kwargs:
+            kwargs["workspace_id"] = self._workspace_key()
         embedded = action in self.EMBEDDED_ACTIONS and self._embedded_enabled()
         try:
             if embedded:
@@ -2933,6 +3046,8 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         except Exception as exc:
             self._error(tr('ui.eb806c6ff81e'), exc)
             return False
+        if action == "launch":
+            self._last_launch_id = operation_id    # the new session, for state that follows a reopened terminal
         if embedded:
             self.show_page("workspace")
         if action == "login" and operation_id:
@@ -2943,6 +3058,14 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QMainWindow):
         self._render_environments()  # show the checking state immediately, not on the next poll
         later(self, 250, self.reload)
         return True
+
+    def _workspace_key(self) -> str:
+        """The shown workspace's id; on a server its terminals share one tmux session named after it."""
+        if self.workspace.workspace_id:
+            return self.workspace.workspace_id
+        if not self.prefs.default_workspace_id_saved:
+            self.prefs.save()           # the default desktop keeps this id, so its tmux session is found again
+        return self.prefs.default_workspace_id
 
     def _mark_pending(self, action: str, kwargs: dict[str, Any]) -> None:
         """Remember an environment-level check that finishes in an external terminal, to show a checking state."""

@@ -473,13 +473,13 @@ def build_stylesheet() -> str:
     QPushButton[size="sm"] {{ min-height: 28px; padding: 0 {S.md}px; font-size: {T.meta}px; border-radius: {R.sm}px; }}
 
     /* ---------- inputs ---------- */
-    QLineEdit, QComboBox, QSpinBox, QKeySequenceEdit QLineEdit {{
+    QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QKeySequenceEdit QLineEdit {{
         background: {C.surface_sunken}; color: {C.text}; border: 1px solid {border};
         border-radius: {R.md}px; padding: 0 {S.md}px; min-height: {Size.control}px;
         selection-background-color: {rgba(C.accent, 0.35)}; selection-color: {C.text};
     }}
-    QLineEdit:hover, QComboBox:hover, QSpinBox:hover {{ border: 1px solid {border_strong}; }}
-    QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ border: 1px solid {C.accent}; }}
+    QLineEdit:hover, QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {{ border: 1px solid {border_strong}; }}
+    QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{ border: 1px solid {C.accent}; }}
     QLineEdit:disabled {{ color: {C.text_disabled}; }}
     QLineEdit#search {{ padding-left: {S.xs}px; }}
     QLineEdit#paletteInput, QLineEdit#paletteInput:focus {{

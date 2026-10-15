@@ -41,15 +41,82 @@ HISTORY_ONLY = {"_copy_transcripts", "sync_history", "_same_project_path", "_cod
 # GitHub helpers every feature needs: work launched for a bound project runs with that account's identity.
 SHARED_GITHUB = {"github_env", "github_session_env", "github_author", "github_helper"}
 
+# Each remote helper ships only the code its action reaches, so every command stays under the Windows command-line
+# limit. SSH hosts are never Windows. tests/test_runtime.py runs every feature's own path on the shipped
+# module, so a missing definition fails there and not on a server.
+WINDOWS_ONLY = {"windows_secret", "windows_user_sid", "windows_process_alive"}
+# The managed Codex terminal: the launcher-owned app-server bridge, its controller and the quota monitor.
+MANAGED_ONLY = {"QuotaSelection", "_quota_timestamp", "quota_state", "select_quota_account", "commit_quota_cursor",
+                "flow_outcome", "initial_quota_account", "checked_quota_policy", "quota_flow", "quota_template", "flow_issues",
+                "flow_link_issue", "claude_handoff_lock", "claude_handoff_locked",
+                "managed_codex_command", "managed_codex_supported", "codex_profile_fingerprint", "_instruction_identity",
+                "instruction_sources_match", "observed_quota", "CodexQuotaMonitor", "ManagedCodexSession",
+                "thread_owner_active", "stop_process", "run_managed_codex", "CodexControlError", "ManagedCodexBridge", "CodexHandoffBlocked",
+                "codex_rule_differences", "align_codex_rules", "account_in_use", "_skill_inventory", "_enabled_plugins", "_callable_apps",
+                "claude_hook", "write_claude_event", "record_claude_quota", "record_claude_status", "_git_bash", "run_user_statusline", "claude_settings",
+                "claude_user_statusline", "managed_claude_supported",
+                "latest_claude_session", "_copy_private_tree", "copy_claude_session", "carry_claude_onboarding", "claude_profile_fingerprint",
+                "claude_capabilities", "ClaudeSupervisor", "ManagedClaudeSession", "run_managed_claude"}
+# Constants only the managed terminal reads (Claude hooks, block workflows, the Codex bridge).
+MANAGED_CONSTANTS = ("CLAUDE_", "FLOW_", "_BRIDGE_")
+# Shared by the managed terminal and the control requests that reach it.
+QUOTA_FLOW = {"QuotaPolicy", "validate_control_accounts", "validate_codex_control", "codex_control_path",
+              "control_worker_alive", "control_heartbeat_age", "process_alive"}
+CONTROL_ONLY = {"codex_control_status", "codex_control_action"}
+# Tool maintenance, session administration and folder browsing: never reached by a launch or its worker.
+NOT_LAUNCH = {"manage_tools", "update_route", "inspect_tool", "upstream_version", "tool_output", "version_number",
+              "maintenance_env", "list_sessions", "session_action", "stop_direct_session", "browse_listing", "manual_import"}
+# A control request only reads the worker's state and queues a command for it.
+CONTROL_KEEP = QUOTA_FLOW | CONTROL_ONLY | {
+    "main", "perform", "emit", "now", "tr", "operation_result", "validate_request", "validate_endpoint", "validate_terminal_profile",
+    "safe_id", "profile_dir", "account_fits", "quota_supported", "switch_supported", "assert_private_path", "assert_private_paths",
+    "protect_path", "private_dir", "read_private", "write_json", "pid_alive", "augmented_path", "user_tool_dirs",
+    "_safe_user_dir", "_node_version"}
+
+
+def _shipped(name: str, feature: str) -> bool:
+    if name in WINDOWS_ONLY:
+        return False
+    if feature == "control":
+        return name in CONTROL_KEEP
+    if name.startswith("harness_"):
+        return feature == "harness"
+    if name.startswith("github_") and name not in SHARED_GITHUB:
+        return feature == "github"
+    if name in HISTORY_ONLY and feature in {"github", "harness"}:
+        return False
+    if name in MANAGED_ONLY or name in QUOTA_FLOW or name in CONTROL_ONLY:
+        return feature == "managed" and name not in CONTROL_ONLY
+    return not (feature == "managed" and name in NOT_LAUNCH)
+
+
+def _shipped_node(node: ast.stmt, feature: str) -> bool:
+    """Does this top-level statement of runtime.py travel with the feature's helper?"""
+    if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+        return _shipped(node.name, feature)
+    return feature == "managed" or not (isinstance(node, ast.Assign) and all(
+        isinstance(target, ast.Name) and target.id.startswith(MANAGED_CONSTANTS) for target in node.targets))
+
+
+def remote_feature(request: dict) -> str:
+    """Which helper a request needs (see ``_shipped``)."""
+    if request["action"] in {"github", "harness"}:
+        return request["action"]
+    if request.get("worker_kind") == "harness":
+        return "harness"
+    if request["action"] == "codex-control":
+        return "control"
+    if (request["action"] in {"launch", "worker"} and request.get("mode", "agent") != "shell"
+            and runtime.switch_supported(request.get("account") or {})):
+        return "managed"
+    return "cli"
+
 
 @lru_cache(maxsize=8)
 def _compressed_runtime(source: bytes, feature: str = "cli", locale: str = "en") -> tuple[str, str]:
     # Ship the same module without comments/docstrings; no remote package dependency.
     tree = ast.parse(source)
-    tree.body = [node for node in tree.body if not (isinstance(node, (ast.FunctionDef, ast.ClassDef)) and
-                 ((node.name.startswith("harness_") and feature != "harness") or
-                  (node.name.startswith("github_") and feature != "github" and node.name not in SHARED_GITHUB) or
-                  (node.name in HISTORY_ONLY and feature in {"github", "harness"})))]
+    tree.body = [node for node in tree.body if _shipped_node(node, feature)]
     from .i18n import catalog
     # Bake only the selected language into the standalone helper. Shipping both
     # source strings and a second catalog can exceed Windows' SSH command limit.
@@ -74,6 +141,20 @@ def _compressed_runtime(source: bytes, feature: str = "cli", locale: str = "en")
     return hashlib.sha256(shipped).hexdigest(), base64.b85encode(lzma.compress(shipped)).decode("ascii")
 
 
+WIDE_BASE = 0x4E00          # CJK Unified Ideographs: 2**14 consecutive assigned, printable characters
+
+
+def _wide(data: bytes) -> str:
+    """14 bits per character. Windows limits a command line in UTF-16 units, not bytes, so a helper too large for ASCII
+    still fits; OpenSSH sends the command to the host as UTF-8 (three bytes each, far below the host's limits)."""
+    padded = data + bytes(-len(data) % 7)
+    out = []
+    for start in range(0, len(padded), 7):
+        value = int.from_bytes(padded[start:start + 7], "big")
+        out.append("".join(chr(WIDE_BASE + (value >> shift & 0x3FFF)) for shift in (42, 28, 14, 0)))
+    return "".join(out)
+
+
 def remote_command(request: dict) -> str:
     """Single SSH authentication; deploy content-addressed helper without SCP.
 
@@ -82,23 +163,36 @@ def remote_command(request: dict) -> str:
     """
     runtime.validate_request(request)
     source = selfcmd.runtime_source()
-    feature = request["action"] if request["action"] in {"github", "harness"} else ("harness" if request.get("worker_kind") == "harness" else "cli")
-    digest, compressed = _compressed_runtime(source, feature, request.get("language", "en"))
-    payload = base64.urlsafe_b64encode(json.dumps(request).encode("utf-8")).decode("ascii")
-    bootstrap = (
-        "import base64,lzma,pathlib,os,sys,hashlib,uuid;"
-        f"b=lzma.decompress(base64.b85decode('{compressed}'));"
-        f"assert hashlib.sha256(b).hexdigest()=='{digest}';"
-        "d=pathlib.Path.home()/'.local/share/vibe-launcher/helpers';"
-        f"p=d/'runtime-{digest}.py';"
-        "ns={'__name__':'vibe_bootstrap','__file__':str(p)};exec(compile(b,str(p),'exec'),ns);"
-        "ns['private_dir'](d);ns['assert_private_path'](p);"
-        "t=d/('upload-'+uuid.uuid4().hex+'.tmp');"
-        "f=t.open('xb');os.chmod(t,0o600);f.write(b);f.close();t.replace(p);"
-        f"os.execv(sys.executable,[sys.executable,'-I',str(p),'{payload}'])"
-    )
-    command = shlex.join(["/usr/bin/python3", "-I", "-c", bootstrap])
+    digest, compressed = _compressed_runtime(source, remote_feature(request), request.get("language", "en"))
+    request_json = json.dumps(request).encode("utf-8")
+    payload = "'" + base64.urlsafe_b64encode(request_json).decode("ascii") + "'"
+
+    def bootstrap(load: str) -> str:
+        return ("import base64,lzma,pathlib,os,sys,hashlib,uuid;" + load +
+                # A helper damaged in transit never runs: 78 tells the launcher that nothing was started.
+                f"sys.exit(78) if hashlib.sha256(b).hexdigest()!='{digest}' else None;"
+                "d=pathlib.Path.home()/'.local/share/vibe-launcher/helpers';"
+                f"p=d/'runtime-{digest}.py';"
+                "import types;m=types.ModuleType('vibe_bootstrap');sys.modules[m.__name__]=m;"
+                "ns=m.__dict__;ns['__file__']=str(p);exec(compile(b,str(p),'exec'),ns);"
+                "ns['private_dir'](d);ns['assert_private_path'](p);"
+                "t=d/('upload-'+uuid.uuid4().hex+'.tmp');"
+                "f=t.open('xb');os.chmod(t,0o600);f.write(b);f.close();t.replace(p);"
+                f"os.execv(sys.executable,[sys.executable,'-I',str(p),{payload}])")
+
+    command = shlex.join(["/usr/bin/python3", "-I", "-c", bootstrap(f"b=lzma.decompress(base64.b85decode('{compressed}'));")])
     if len(command) > 28000:
+        # Too long as ASCII: carry the helper as a separate argument, 14 bits per character, followed by the request
+        # (compressed: account pools and flows repeat themselves). The host recovers the exact bytes with os.fsencode
+        # whatever its locale, and the digest check above still guards the helper.
+        raw, packed = base64.b85decode(compressed), lzma.compress(request_json)
+        load = ("c=[ord(x)-19968 for x in os.fsencode(sys.argv[1]).decode()];"
+                "a=b''.join((c[i]<<42|c[i+1]<<28|c[i+2]<<14|c[i+3]).to_bytes(7,'big') for i in range(0,len(c),4));"
+                f"b=lzma.decompress(a[:{len(raw)}]);"
+                f"q=base64.urlsafe_b64encode(lzma.decompress(a[{len(raw)}:{len(raw) + len(packed)}])).decode();")
+        payload = "q"
+        command = shlex.join(["/usr/bin/python3", "-I", "-c", bootstrap(load), _wide(raw + packed)])
+    if len(command) > 28000 or len(command.encode("utf-8")) > 120000:
         raise ValueError(tr('service.80d4e1d496b1'))
     return command
 
@@ -115,7 +209,7 @@ def ssh_args(target: str, request: dict, *, root: Path | None = None, environmen
         args += ["-o", "PreferredAuthentications=password", "-o", "KbdInteractiveAuthentication=no", "-o", "PubkeyAuthentication=no"]
     elif mode == "key":
         args += ["-o", "PreferredAuthentications=publickey", "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no"]
-    noninteractive = request["action"] in {"list-sessions", "quota", "browse", "harness", "import-settings", "import-history"} or (request["action"] == "github" and request.get("github_operation") != "login")
+    noninteractive = request["action"] in {"codex-control", "list-sessions", "quota", "browse", "harness", "import-settings", "import-history"} or (request["action"] == "github" and request.get("github_operation") != "login")
     args += ["-T" if noninteractive else "-tt", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3"]
     if request.get("login_method") == "browser" and request.get("account", {}).get("tool") == "codex":
         # Re-evaluate with forwarding enabled; refuse any inherited forwards.
@@ -134,26 +228,43 @@ class LauncherService:
         self.store = store
         self.root = store.path.parent
 
+    def control_accounts(self, accounts: list, environment_id: str) -> list[dict]:
+        """The Codex subscription accounts a control request may name, re-read from the store: only their nonsecret
+        identity fields leave the desktop, whatever the caller passed in."""
+        if not isinstance(accounts, list) or len(accounts) > 128:
+            raise ValueError("Invalid Codex account pool")
+        result = []
+        for item in accounts:
+            account = self.store.get("accounts", item.get("id") if isinstance(item, dict) else item)
+            if not runtime.switch_supported(account) or not runtime.account_fits(account, environment_id):
+                raise ValueError("Select Codex or Claude subscription accounts of this environment")
+            result.append({key: account[key] for key in runtime.CONTROL_ACCOUNT_FIELDS if key in account})
+        return result
+
     def start(self, action: str, *, preset_id: str | None = None, account_id: str | None = None,
               environment_id: str | None = None, session_id: str | None = None,
               login_method: str = "device", tool: str | None = None, snap_channel: str = "",
               mode: str = "agent", spawn: Callable[[list[str], dict], Any] | None = None,
               session_ids: list[str] | None = None, operation: dict | None = None,
-              github_account_id: str | None = None, terminal_profile: str = "", resume: bool = False) -> str | None:
+              github_account_id: str | None = None, terminal_profile: str = "", resume: bool = False,
+              resume_thread_id: str = "", quota_policy: dict | None = None, workspace_id: str = "",
+              quota_cursor: str = "") -> str | None:
         """Create a job and run it. ``spawn(args, context)`` runs it in a terminal of the caller's choosing (the app's
         built-in terminal); without it the job opens in an external console window. Returns the new session id."""
-        if action not in {"launch", "login", "doctor", "refresh", "attach", "stop", "ssh-settings", "check-tools", "update-tool", "quota", "browse", "github", "harness", "import-settings", "import-history"}:
+        if action not in {"codex-control", "launch", "login", "doctor", "refresh", "attach", "stop", "ssh-settings", "check-tools", "update-tool", "quota", "browse", "github", "harness", "import-settings", "import-history"}:
             raise ValueError("Unknown action")
         request = {"action": "list-sessions" if action == "refresh" else action,
                    "nonce": uuid.uuid4().hex, "login_method": login_method}
         from .i18n import language
         request["language"] = language()
         if operation is not None:
-            allowed = {"github_operation", "github_remote", "github_url", "github_apply", "github_check_access", "github_expected_remote_url", "github_revision", "github_author_name", "github_author_email", "path", "github_new_remote", "harness_operation", "harness_port", "local_port", "project_history"}
-            if action not in {"github", "harness", "import-settings", "import-history"} or operation.keys() - allowed:
+            operation = dict(operation)
+            allowed = ({"control_action", "target_account_id", "allow_gaps", "align_rules", "policy", "accounts"} if action == "codex-control" else
+                       {"github_operation", "github_remote", "github_url", "github_apply", "github_check_access", "github_expected_remote_url", "github_revision", "github_author_name", "github_author_email", "path", "github_new_remote", "harness_operation", "harness_port", "local_port", "project_history"})
+            if action not in {"codex-control", "github", "harness", "import-settings", "import-history"} or operation.keys() - allowed:
                 raise ValueError("Unsupported operation parameters")
             request.update(operation)
-        if action in {"login", "github", "harness", "import-settings", "import-history"}:
+        if action in {"codex-control", "login", "github", "harness", "import-settings", "import-history"}:
             request["operation_id"] = uuid.uuid4().hex
         if action in {"check-tools", "update-tool"}:
             request.update(tool=tool, snap_channel=snap_channel)
@@ -217,6 +328,26 @@ class LauncherService:
             raise ValueError("Terminal profile requires terminal mode")
         if resume and action == "launch" and mode != "shell":
             request["resume"] = True        # continue the folder's last conversation (restoring, not a fresh start)
+        if resume_thread_id:
+            if action != "launch" or not runtime.switch_supported(request.get("account", {})):
+                raise ValueError("Exact conversation resume requires a Codex or Claude subscription launch")
+            request["resume_thread_id"] = runtime.safe_id(resume_thread_id)
+        if action == "codex-control":
+            request["accounts"] = self.control_accounts(request.get("accounts", []), environment_id)
+        if workspace_id and action in {"launch", "stop"} and environment["kind"] == "ssh":
+            request["workspace_id"] = runtime.safe_id(workspace_id)     # the workspace's tmux session on the host
+        if (action == "launch" and mode != "shell" and environment["kind"] != "ssh"
+                and request.get("account", {}).get("tool") == "claude" and runtime.switch_supported(request["account"])):
+            # Hooks of a managed local Claude session call back into the launcher (a host uses its own runtime.py).
+            request["claude_hook_command"] = selfcmd.hook_command("claude_hook")
+        if quota_policy is not None:
+            if action != "launch" or mode == "shell" or not runtime.switch_supported(request.get("account", {})):
+                raise ValueError("Quota management requires a Codex or Claude subscription launch")
+            policy = runtime.checked_quota_policy(quota_policy)
+            request.update(quota_policy=policy.to_dict(),
+                           quota_accounts=self.control_accounts(list(policy.account_ids), environment_id))
+            if quota_cursor in policy.account_ids:
+                request["quota_cursor"] = quota_cursor
         if action in {"launch", "login", "quota"} and not account_id and mode != "shell":
             raise ValueError("Select an account")
         if action == "launch" and not preset_id:
@@ -232,6 +363,7 @@ class LauncherService:
                 "environment_id": environment_id, "name": preset["name"], "path": preset["path"],
                 "persistent": request["persistent"], "mode": mode, "status": "queued", "updated_at": runtime.now(),
                 **({"terminal_profile": request["terminal_profile"]["id"]} if "terminal_profile" in request else {}),
+                **({"workspace_id": request["workspace_id"]} if request.get("workspace_id") else {}),
             })
             request["session_id"] = session["id"]
             preset["last_used"] = runtime.now()

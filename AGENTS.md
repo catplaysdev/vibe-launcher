@@ -95,7 +95,8 @@ window, `vibe-launcher-cli.exe` for helpers; one folder, one set of files). Ther
 
 **Build and release procedure: use the `package-release` skill** (`.agents/skills/package-release/SKILL.md`; it is tracked
 in git and maintained by Codex; Claude Code may read it but edits go through Codex). In short: `powershell -File packaging/build.ps1` builds `dist-app/Vibe Launcher/` (about 370 MB
-on disk, idle about 95 MB of memory, measured offscreen without a terminal), self-tests it and, with Inno Setup 6, builds the
+on disk, idle about 102 MB working set / 60 MB private, measured offscreen without a terminal; Qt WebEngine is not loaded
+until the first terminal, and an antivirus scan of freshly built files can briefly raise the working set to about 210 MB), self-tests it and, with Inno Setup 6, builds the
 installer and `SHA256SUMS.txt`. Keep it small and quiet: no UPX, no `collect_all`, no extra Qt modules without a reason,
 Chromium language packs cut to the shipped languages, tray icon only while the user has turned on minimize-to-tray, no background service, no updater process. Resource
 budget for anything new: nothing runs between user actions except the update check (one small HTTPS request, at most every
