@@ -12,8 +12,8 @@ from . import runtime
 LOCALES = Path(__file__).with_name("locales")
 LANGUAGES = {
     "en": "English",
-    "zh-TW": "繁體中文（台灣）",
-    "zh-CN": "简体中文（中国大陆）",
+    "zh-TW": "繁體中文",
+    "zh-CN": "简体中文",
     "ja": "日本語",
     "ko": "한국어",
     "de": "Deutsch",
