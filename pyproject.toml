@@ -1,6 +1,6 @@
 [project]
 name = "vibe-launcher"
-version = "0.3.0"
+version = "0.3.1"
 description = "Desktop launcher (Windows; Linux planned) for isolated Codex and Claude profiles over SSH"
 requires-python = ">=3.11"
 license = "GPL-3.0-or-later"
