@@ -437,6 +437,56 @@ def test_github_job_runner_reports_account_without_ai_profile(tmp_path, qtbot, m
 
 
 # --- service ----------------------------------------------------------------------------------------------------------
+@pytest.mark.parametrize("nested", [False, True])
+def test_runner_keeps_system_error_details_without_printing_sensitive_paths(tmp_path, monkeypatch, capsys, nested):
+    store = Store(tmp_path / "gui.sqlite3")
+    account = store.save("accounts", {"name": "Example", "tool": "codex", "auth": "subscription"})
+    commands = []
+    LauncherService(store).start("login", account_id=account["id"], environment_id="local",
+                                 spawn=lambda argv, ctx: commands.append(argv))
+    monkeypatch.setattr(runner.sys, "argv", ["runner", commands[0][-1]])
+    monkeypatch.setenv("VIBE_EMBEDDED", "1")
+    def fail(*args):
+        raise PermissionError(13, "Access denied", "sensitive-profile-file")
+    if nested:
+        monkeypatch.setattr(runtime.os, "get_exec_path", fail)
+        monkeypatch.setattr(runtime, "perform", lambda *args: runtime.trusted_executable("codex"))
+    else:
+        monkeypatch.setattr(runtime, "perform", fail)
+    assert runner.main() != 0
+    output = capsys.readouterr().out
+    assert "Access denied" in output and "system error 13" in output
+    assert ("step trusted_executable" if nested else "step perform") in output
+    assert "sensitive-profile-file" not in output
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows security APIs")
+@pytest.mark.parametrize("operation", ["token", "descriptor"])
+def test_windows_security_errors_preserve_native_error_code(tmp_path, monkeypatch, operation):
+    import ctypes
+    from types import SimpleNamespace
+
+    def fail(*args):
+        ctypes.set_last_error(5)
+        return 0
+
+    def unused(*args):
+        pytest.fail("The failing API must stop initialization")
+
+    api = SimpleNamespace(OpenProcessToken=fail, GetTokenInformation=unused, ConvertSidToStringSidW=unused,
+                          ConvertStringSecurityDescriptorToSecurityDescriptorW=fail, SetFileSecurityW=unused)
+    kernel = SimpleNamespace(CloseHandle=unused, LocalFree=unused)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, **kwargs: api if name.lower() == "advapi32.dll" else kernel)
+    with pytest.raises(OSError) as caught:
+        if operation == "token":
+            runtime.windows_user_sid.__wrapped__()
+        else:
+            monkeypatch.setattr(runtime, "windows_user_sid", lambda: "S-1-5-21-1000")
+            runtime.protect_path(tmp_path)
+    assert caught.value.winerror == 5
+    assert "Cannot open Windows user token" in str(caught.value) if operation == "token" else "Cannot create private data ACL" in str(caught.value)
+
+
 def setup(store):
     account = store.save("accounts", {"name": "A", "tool": "codex", "auth": "subscription"})
     preset = store.save("presets", {"name": "Project", "account_id": account["id"],

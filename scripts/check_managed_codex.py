@@ -55,7 +55,12 @@ def main() -> int:
     executable = shutil.which("codex.exe")
     if os.name != "nt" or not executable:
         raise RuntimeError("This check requires Windows and an installed Codex CLI")
-    version = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=30).stdout.strip()
+    version_profile = root / "version-profile"
+    version_profile.mkdir()
+    version_env = {key: value for key, value in os.environ.items() if key.upper() in {
+        "SYSTEMROOT", "WINDIR", "PATH", "TEMP", "TMP", "PATHEXT", "COMSPEC", "LOCALAPPDATA"}}
+    version_env.update(CODEX_HOME=str(version_profile), HOME=str(version_profile), USERPROFILE=str(version_profile))
+    version = subprocess.run([executable, "--version"], env=version_env, capture_output=True, text=True, timeout=30).stdout.strip()
     state = root / "state"
     state.mkdir()
     project = root / "project"
@@ -106,6 +111,8 @@ def main() -> int:
 
     request = {"session_id": "smoke", "environment_id": "local", "account": accounts["a"], "path": str(project)}
     report = {"codex_version": version, "real_accounts": False, "external_inference": False, "ssh": False}
+    import ctypes
+    report["elevated"] = bool(ctypes.windll.shell32.IsUserAnAdmin())
     chunks: list[bytes] = []
     terminal = None
     bridge = runtime.ManagedCodexBridge(factory, "a", deadline=30)
@@ -200,9 +207,24 @@ def main() -> int:
         report["native_tui_bound"] = True
         thread_id = first["thread_id"]
         time.sleep(3)
+        submit("/resume")
+        await_state(lambda _s: any(entry[0] == "rpc:thread/list" for entry in trace), "native /resume picker reads history")
+        terminal.write(b"\x1b")
+        await_state(lambda _s: not bridge._pickers, "picker cancellation closes only its history connection")
+        report["native_resume_picker"] = terminal.is_alive() and bridge.snapshot()["thread_id"] == thread_id
+        report["resume_picker_error_absent"] = b"Failed to start TUI session picker" not in b"".join(chunks)
         submit("Return the offline fixture reply only.")
         await_state(lambda s: completed(thread_id) == 1 and s["can_switch"], "first turn completes")
         report["turn_1_on_a"] = bridge.snapshot()["last_turn_status"] == "completed"
+        submit("/new")
+        await_state(lambda s: bool(s["thread_id"]) and s["thread_id"] != thread_id and s["can_switch"], "native /new binds another thread")
+        reads = sum(entry[0] == "rpc:thread/list" for entry in trace)
+        submit("/resume")
+        await_state(lambda _s: sum(entry[0] == "rpc:thread/list" for entry in trace) > reads, "picker lists the earlier conversation")
+        time.sleep(1)
+        terminal.write(b"\r")
+        await_state(lambda s: s["thread_id"] == thread_id and s["can_switch"], "native /resume binds the selected conversation")
+        report["resume_selected_conversation"] = True
         settings_before = dict(bridge._settings)
         first_owner = owners[0]
 
@@ -299,7 +321,7 @@ def main() -> int:
     (root / "tui-output.txt").write_bytes(b"".join(chunks))
     (root / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
-    required = ("native_tui_bound", "turn_1_on_a", "switch_request_accepted", "manual_exact_handoff", "original_writer_exited",
+    required = ("native_tui_bound", "native_resume_picker", "resume_picker_error_absent", "resume_selected_conversation", "turn_1_on_a", "switch_request_accepted", "manual_exact_handoff", "original_writer_exited",
                 "frontend_survived", "settings_preserved", "state_reports_b", "turn_2_on_b", "policy_accepted",
                 "policy_selected_a", "auto_continued_after_quota_failure", "single_writer_at_end", "all_owners_exited",
                 "state_closed", "reopen_exact_thread")

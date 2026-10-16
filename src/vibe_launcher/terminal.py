@@ -20,7 +20,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QElapsedTimer, QEvent, QObject, QTimer, QUrl, Qt, Signal, Slot
 from PySide6.QtGui import QAction, QColor
-from PySide6.QtWidgets import QApplication, QMenu, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QMenu, QPushButton, QVBoxLayout, QWidget
 
 from . import conpty, theme
 from .theme import C
@@ -34,6 +34,9 @@ PRESENT_DELAY_MS = 17
 PRESENT_FRAMES = 2
 OUTPUT_LIMIT = 262144
 OUTPUT_BATCH = 131072
+# Many pages starting together (a restore) on a cold first run need far longer than one page: 12 pages took ~9 s on a warm
+# machine. Timing out earlier left their programs unstarted (sessions stuck "queued").
+DISPLAY_TIMEOUT_MS = 45000
 
 
 class _OutputBuffer:
@@ -45,6 +48,7 @@ class _OutputBuffer:
         self._pending = bytearray()
         self._inflight = 0
         self._closed = False
+        self._discarding = False
         self.peak = 0
 
     @property
@@ -56,9 +60,9 @@ class _OutputBuffer:
         offset = 0
         while offset < len(data):
             with self._condition:
-                self._condition.wait_for(lambda: self._closed or
+                self._condition.wait_for(lambda: self._closed or self._discarding or
                                          len(self._pending) + self._inflight < self.limit)
-                if self._closed:
+                if self._closed or self._discarding:
                     return
                 outstanding = len(self._pending) + self._inflight
                 count = min(len(data) - offset, self.limit - outstanding)
@@ -86,6 +90,13 @@ class _OutputBuffer:
     def close(self) -> None:
         with self._condition:
             self._closed = True
+            self._condition.notify_all()
+
+    def discard(self, enabled: bool) -> None:
+        with self._condition:
+            self._discarding = enabled
+            self._pending.clear()
+            self._inflight = 0
             self._condition.notify_all()
 
 _webengine_ok: bool | None = None
@@ -278,6 +289,7 @@ class TerminalWidget(QWidget):
 
     _output = Signal()
     _exit_code = Signal(int)
+    _input_error = Signal(str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -308,6 +320,11 @@ class TerminalWidget(QWidget):
         self._page_ready = False
         self._want_focus = False
         self._disposed = False
+        self._display_failed = False
+        self._display_timer = QTimer(self)
+        self._display_timer.setSingleShot(True)
+        self._display_timer.setInterval(DISPLAY_TIMEOUT_MS)
+        self._display_timer.timeout.connect(self._fail_display)
         # Output is handed to the page in batches: wait until the program pauses (FLUSH_IDLE_MS) but never longer than
         # FLUSH_MAX_MS, so a full-screen redraw usually arrives in one piece instead of as several half frames.
         self._flush_timer = QTimer(self)
@@ -328,6 +345,7 @@ class TerminalWidget(QWidget):
         self.title = ""
 
         self._view = QWebEngineView(self)
+        self._page_type = LockedPage
         self._page = LockedPage(_shared_profile(), self._view)
         self._view.setPage(self._page)
         settings = self._page.settings()
@@ -345,24 +363,48 @@ class TerminalWidget(QWidget):
         self._view.customContextMenuRequested.connect(self._context_menu)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        self._warning = QLabel(self)
+        self._warning.setWordWrap(True)
+        self._warning.setTextFormat(Qt.TextFormat.PlainText)
+        self._warning.hide()
+        self._recover = QPushButton(tr("Restore terminal display"), self)
+        self._recover.clicked.connect(self._restore_display)
+        self._recover.hide()
+        layout.addWidget(self._warning)
+        layout.addWidget(self._recover)
         layout.addWidget(self._view)
 
-        self._bridge = _Bridge(self)
-        self._channel = QWebChannel(self._page)
-        self._channel.registerObject("bridge", self._bridge)
-        self._page.setWebChannel(self._channel)
-        self._bridge.input_text.connect(self._on_input)
-        self._bridge.input_binary.connect(self._on_binary)
-        self._bridge.size_changed.connect(self._on_resized)
-        self._bridge.ready_sig.connect(self._on_ready)
-        self._bridge.written_sig.connect(self._on_written)
-        self._bridge.titled.connect(self._on_title)
-        self._bridge.belled.connect(self.activity)
-        self._bridge.copied.connect(lambda text: QApplication.clipboard().setText(text))
-        self._bridge.chorded.connect(self.chord)
         self._output.connect(self._on_output)
         self._exit_code.connect(self._on_exit)
-        self._page.setHtml(terminal_html(), QUrl.fromLocalFile(str(ASSETS / "xterm") + os.sep))
+        self._input_error.connect(self._show_input_error)
+        self._wire_page()
+
+    def _wire_page(self) -> None:
+        from PySide6.QtWebChannel import QWebChannel
+        page = self._page
+        # A replaced page can still have queued events. None may reach the live terminal.
+        def guard(callback):
+            def invoke(*args):
+                if not self._disposed and self._page is page:
+                    callback(*args)
+            return invoke
+        self._bridge = _Bridge(page)
+        self._channel = QWebChannel(page)
+        self._channel.registerObject("bridge", self._bridge)
+        page.setWebChannel(self._channel)
+        self._bridge.input_text.connect(guard(self._on_input))
+        self._bridge.input_binary.connect(guard(self._on_binary))
+        self._bridge.size_changed.connect(guard(self._on_resized))
+        self._bridge.ready_sig.connect(guard(self._on_ready))
+        self._bridge.written_sig.connect(guard(self._on_written))
+        self._bridge.titled.connect(guard(self._on_title))
+        self._bridge.belled.connect(guard(self.activity.emit))
+        self._bridge.copied.connect(guard(lambda text: QApplication.clipboard().setText(text)))
+        self._bridge.chorded.connect(guard(self.chord.emit))
+        page.renderProcessTerminated.connect(guard(lambda *_: self._fail_display()))
+        page.loadFinished.connect(guard(self._loaded))
+        self._display_timer.start()
+        page.setHtml(terminal_html(), QUrl.fromLocalFile(str(ASSETS / "xterm") + os.sep))
 
     # -- process ----------------------------------------------------------------------------
     def start(self, command: list[str], *, cwd: str | None = None, env: dict[str, str] | None = None) -> None:
@@ -381,9 +423,11 @@ class TerminalWidget(QWidget):
         self._launch = None
         try:
             self._pty = conpty.ConPty(command, cwd=cwd, env=env, cols=self.cols, rows=self.rows,
-                                      on_output=self._queue_output, on_exit=self._exit_code.emit)
+                                      on_output=self._queue_output, on_exit=self._exit_code.emit,
+                                      on_input_error=lambda error: self._input_error.emit(str(error)))
         except OSError as error:
             self._queue_output(tr('terminal.d892ae89d453', v0=f'{error}').encode("utf-8")[:8192])
+            self._show_input_error(tr("Built-in terminal could not start: {error}", error=str(error)[:300]))
             self.exit_code = -1
             self.exited.emit(-1)
 
@@ -397,16 +441,12 @@ class TerminalWidget(QWidget):
         return bool(self._pty and self.exit_code is None and self._pty.is_alive())
 
     def send_text(self, text: str) -> None:
-        if self._pty and self.exit_code is None:
-            self._pty.write(text.encode("utf-8"))
+        self.send_bytes(text.encode("utf-8"))
 
     def send_bytes(self, data: bytes) -> None:
-        if self._pty and self.exit_code is None:
-            self._pty.write(data)
-
-    def detach_tmux(self) -> None:
-        """Leave a tmux session running on the server: send its prefix (Ctrl+B) then ``d``."""
-        self.send_bytes(b"\x02d")
+        if self._pty and self.exit_code is None and self._page_ready and not self._display_failed:
+            if self._pty.write(data) is False:
+                self._show_input_error(tr("Terminal input is busy or unavailable. This input was not sent."))
 
     def terminate(self) -> None:
         self._buffer.close()  # wake a reader blocked on a stalled/closed page before stopping its process
@@ -466,6 +506,7 @@ class TerminalWidget(QWidget):
             return
         self._write_sequence += 1
         self._awaiting_write = self._write_sequence
+        self._display_timer.start()
         self._page.runJavaScript("vl.write('%s', %d)" %
                                  (base64.b64encode(chunk).decode("ascii"), self._awaiting_write))
 
@@ -474,6 +515,7 @@ class TerminalWidget(QWidget):
         if self._disposed or not self._awaiting_write or sequence != self._awaiting_write:
             return
         self._awaiting_write = 0
+        self._display_timer.stop()
         self._buffer.acknowledge()
         self._schedule_flush()
         self._presents_left = PRESENT_FRAMES
@@ -509,7 +551,7 @@ class TerminalWidget(QWidget):
 
     def submit(self, text: str, enter: bool = True) -> None:
         """Send text from the input bar as if typed (several lines as one paste), then Enter."""
-        if self.exit_code is None:
+        if self.exit_code is None and not self._display_failed:
             self._js("vl.submit(%s, %s)" % (_js_string(text), "true" if enter else "false"))
 
     @Slot(int)
@@ -530,6 +572,9 @@ class TerminalWidget(QWidget):
 
     @Slot(int, int)
     def _on_ready(self, cols: int, rows: int) -> None:
+        if self._display_failed or self._disposed:
+            return
+        self._display_timer.stop()
         self._page_ready = True
         self._on_resized(cols, rows)
         self._spawn()
@@ -537,6 +582,51 @@ class TerminalWidget(QWidget):
             self.focus_terminal()
         self._schedule_flush()
         self.ready.emit()
+
+    def _loaded(self, ok: bool) -> None:
+        if not ok:
+            self._fail_display()
+
+    def _show_input_error(self, message: str) -> None:
+        if not self._disposed:
+            self._warning.setText(message[:500])
+            self._warning.show()
+
+    def _fail_display(self) -> None:
+        if self._disposed or self._display_failed:
+            return
+        self._display_failed = True
+        self._page_ready = False
+        self._awaiting_write = 0
+        self._display_timer.stop()
+        self._flush_timer.stop()
+        self._present_timer.stop()
+        self._buffer.discard(True)
+        self._warning.setText(tr("Terminal display failed. The program has not been stopped. Output may be missing; restore the display or reconnect to tmux."))
+        self._warning.show()
+        self._recover.show()
+        self._view.hide()
+        if self.exit_code is not None:
+            self.output_drained.emit()
+
+    def _restore_display(self) -> None:
+        if self._disposed:
+            return
+        self._display_failed = False
+        self._page_ready = False
+        self._buffer.discard(False)
+        self._recover.hide()
+        self._warning.setText(tr("Display restored. Earlier output may be missing. The program was not restarted."))
+        self._view.show()
+        from PySide6.QtWebEngineCore import QWebEngineSettings
+        previous = self._page
+        self._page = self._page_type(_shared_profile(), self._view)
+        for attribute in QWebEngineSettings.WebAttribute:
+            self._page.settings().setAttribute(attribute, previous.settings().testAttribute(attribute))
+        self._page.setBackgroundColor(C.bg)
+        self._view.setPage(self._page)
+        previous.deleteLater()
+        self._wire_page()
 
     @Slot(int, int)
     def _on_resized(self, cols: int, rows: int) -> None:
@@ -576,6 +666,7 @@ class TerminalWidget(QWidget):
         _live.discard(self)
         self._flush_timer.stop()
         self._present_timer.stop()
+        self._display_timer.stop()
         self.terminate()
         self._view.setPage(None)
         self._page.deleteLater()
