@@ -16,6 +16,7 @@ import os
 import subprocess
 import threading
 import time
+from collections import deque
 from ctypes import wintypes
 from typing import Callable
 
@@ -29,6 +30,63 @@ _STARTF_USESTDHANDLES = 0x00000100
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _INFINITE = 0xFFFFFFFF
+INPUT_LIMIT = 1024 * 1024
+
+
+class _InputWriter:
+    """Bounded, ordered input; a blocked pipe must never block the GUI."""
+
+    def __init__(self, write, on_error):
+        self._write, self._on_error = write, on_error
+        self._condition = threading.Condition()
+        self._pending = deque()
+        self._size = 0
+        self._closed = False
+        self.thread = threading.Thread(target=self._run, name="conpty-writer", daemon=True)
+        self.thread.start()
+
+    def put(self, data: bytes) -> bool:
+        with self._condition:
+            if self._closed or self._size + len(data) > INPUT_LIMIT:
+                return False
+            self._pending.append(bytes(data))
+            self._size += len(data)
+            self._condition.notify()
+            return True
+
+    def close(self) -> None:
+        with self._condition:
+            self._closed = True
+            self._pending.clear()
+            self._condition.notify_all()
+
+    def _run(self) -> None:
+        try:
+            while True:
+                with self._condition:
+                    self._condition.wait_for(lambda: self._closed or self._pending)
+                    if self._closed:
+                        return
+                    data = self._pending.popleft()
+                offset = 0
+                while offset < len(data):
+                    with self._condition:
+                        if self._closed:
+                            return
+                    chunk = data[offset:offset + 4096]
+                    count = self._write(chunk)
+                    if not 0 < count <= len(chunk):
+                        raise OSError("Terminal input made no progress")
+                    offset += count
+                with self._condition:
+                    self._size -= len(data)
+                    self._condition.notify_all()
+        except OSError as error:
+            with self._condition:
+                report = not self._closed
+            self.close()
+            if report:
+                self._on_error(error)
 
 
 class COORD(ctypes.Structure):
@@ -102,6 +160,8 @@ def _api():
         "GetExitCodeProcess": ([H, P(wintypes.DWORD)], wintypes.BOOL),
         "WaitForSingleObject": ([H, wintypes.DWORD], wintypes.DWORD),
         "CancelIoEx": ([H, ctypes.c_void_p], wintypes.BOOL),
+        "OpenThread": ([wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], H),
+        "CancelSynchronousIo": ([H], wintypes.BOOL),
         "CreateJobObjectW": ([ctypes.c_void_p, wintypes.LPCWSTR], H),
         "SetInformationJobObject": ([H, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD], wintypes.BOOL),
         "AssignProcessToJobObject": ([H, H], wintypes.BOOL),
@@ -127,11 +187,13 @@ class ConPty:
 
     def __init__(self, command: list[str], *, cwd: str | None = None, env: dict[str, str] | None = None,
                  cols: int = 120, rows: int = 30, on_output: Callable[[bytes], None] | None = None,
-                 on_exit: Callable[[int], None] | None = None):
+                 on_exit: Callable[[int], None] | None = None,
+                 on_input_error: Callable[[OSError], None] | None = None):
         if not available():
             raise OSError("ConPTY is not available on this system")
         self._k = k = _api()
         self.on_output, self.on_exit = on_output, on_exit
+        self.on_input_error = on_input_error
         self._lock = threading.Lock()
         self._console_closed = False
         self._closing = False
@@ -164,6 +226,9 @@ class ConPty:
         except Exception:
             self._release()
             raise
+        self._writer = _InputWriter(self._write_bytes, lambda error: self.on_input_error and self.on_input_error(error))
+        # Retain the actual thread object handle: a native thread ID can be reused after exit.
+        self._writer_handle = k.OpenThread(0x0001, False, self._writer.thread.native_id)
         self._reader = threading.Thread(target=self._read_loop, name="conpty-reader", daemon=True)
         self._reader.start()
         threading.Thread(target=self._wait_loop, name="conpty-waiter", daemon=True).start()
@@ -233,10 +298,15 @@ class ConPty:
         else:
             self.exit_code = -1
         time.sleep(0.15)
+        self._stop_writer()
+        while self._writer.thread.is_alive():
+            self._writer.thread.join(0.05)
+            self._stop_writer()  # cancellation may have raced the beginning of a synchronous WriteFile
         self._close_console()
         # A busy/hidden renderer may apply backpressure longer than three seconds. Never close the pipe before
         # its final output has drained. TerminalWidget releases its reader on explicit stop/disposal.
         self._reader.join()
+        self._writer.thread.join()
         self._release()
         if self.on_exit is not None:
             self.on_exit(self.exit_code)
@@ -248,12 +318,23 @@ class ConPty:
             self._console_closed = True
         self._k.ClosePseudoConsole(self._pc)
 
-    def write(self, data: bytes) -> None:
-        if self._closing or self._console_closed or not data:
-            return
+    def write(self, data: bytes) -> bool:
+        if self._closing or self._console_closed or not self._writer_handle or not data:
+            return False
+        return self._writer.put(data)
+
+    def _write_bytes(self, data: bytes) -> int:
         written = wintypes.DWORD()
         view = ctypes.create_string_buffer(data, len(data))
-        self._k.WriteFile(self._in_write, view, len(data), ctypes.byref(written), None)
+        if not self._k.WriteFile(self._in_write, view, len(data), ctypes.byref(written), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return written.value
+
+    def _stop_writer(self) -> None:
+        self._writer.close()
+        with self._lock:
+            if self._writer_handle:
+                self._k.CancelSynchronousIo(self._writer_handle)
 
     def resize(self, cols: int, rows: int) -> None:
         if not (self._closing or self._console_closed) and cols > 0 and rows > 0:
@@ -276,11 +357,18 @@ class ConPty:
     def close(self) -> None:
         """Stop the child tree. The waiter thread finishes the teardown once the process is gone."""
         self._closing = True
+        self._stop_writer()
         self.terminate()
 
     def _release(self) -> None:
         k = self._k
-        for name in ("_in_write", "_out_read", "_h_process", "_job"):
+        for name in ("_in_write", "_out_read", "_h_process", "_job", "_writer_handle"):
+            if name == "_writer_handle":
+                with self._lock:
+                    handle, self._writer_handle = getattr(self, name, None), None
+                    if handle:
+                        k.CloseHandle(handle)
+                continue
             handle = getattr(self, name, None)
             if handle:
                 if name == "_out_read":

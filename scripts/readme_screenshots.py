@@ -168,7 +168,7 @@ def render(lang: str) -> list[Path]:
                                                                     ("claude", "Docs portal", "Personal", "build-server"))):
         tab = window.workspace.add_terminal(TabInfo(id=f"t{index}", title=tool.capitalize(), project=project,
                                                     environment=environment, kind="agent", tool=tool, account_name=account,
-                                                    tmux=True), fake_terminal(tool))
+                                                    tmux=True, session_id="s1" if index == 0 else "s3"), fake_terminal(tool))
         tab.pane.set_composer_visible(index == 1)
     shot(window, "workspace")
 

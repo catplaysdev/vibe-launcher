@@ -43,6 +43,7 @@ ROOTS = {
                 "ensure_project_dir", "direct_outcome", "augmented_path", "run_managed_codex", "ManagedCodexSession",
                 "ManagedCodexBridge", "CodexQuotaMonitor"},
     "control": {"main", "validate_request", "codex_control_action", "operation_result", "augmented_path"},
+    "quota": {"main", "validate_request", "fetch_quota", "quota_file", "operation_result", "augmented_path"},
 }
 
 
@@ -64,7 +65,7 @@ def guarded(name, feature):
     # Reached only behind ``if WINDOWS`` (an SSH host is never Windows), or, in the plain helper, only behind a Codex
     # subscription launch or a control request, which ``remote_feature`` sends to the managed / control helpers.
     # The Claude hook branch of main() only runs from a managed helper's own --claude-hook command.
-    return (name in service.WINDOWS_ONLY or (feature == "cli" and name in service.MANAGED_ONLY | service.QUOTA_FLOW)
+    return (name in service.WINDOWS_ONLY or (feature in {"cli", "quota"} and name in service.MANAGED_ONLY | service.QUOTA_FLOW)
             or (feature == "control" and name in service.MANAGED_ONLY))
 
 
@@ -151,6 +152,22 @@ def test_small_helpers_keep_the_ascii_transport():
         args = shlex.split(service.remote_command(request))
         assert len(args) == 4
         assert args[3].isascii()
+
+
+def test_detach_helper_executes_from_the_shipped_standalone_source(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    namespace = shipped_namespace("session", monkeypatch)
+    assert "detach_session" in namespace
+    assert "ManagedCodexBridge" not in namespace
+    namespace["read_private"] = lambda path: json.dumps({"session_id": "s", "environment_id": "host"})
+    namespace["tmux_windows"] = lambda: {"s": "@1"}
+    namespace["tmux_session_exists"] = lambda sid: True
+    namespace["tmux"] = lambda *a, **k: SimpleNamespace(returncode=0, stdout=b"@1\n" if a[0] == "list-windows" else b"")
+    results = []
+    namespace["operation_result"] = lambda request, root, result: results.append(result)
+    assert namespace["perform"]({"action": "detach", "session_id": "s", "environment_id": "host",
+                                  "attachment_nonce": "attachment"}, tmp_path) == 0
+    assert results == [{"status": "detached"}]
 
 
 def test_control_helper_answers_from_the_shipped_module(tmp_path, monkeypatch):
@@ -454,7 +471,7 @@ def test_successful_remote_stop_updates_gui_state(tmp_path, monkeypatch):
     monkeypatch.setattr(askpass, "ssh_environment", lambda *a: None)
     monkeypatch.setattr(runner, "ssh_args", lambda *a, **k: ["fake-ssh"])
     class Stopped:
-        stdout = io.BytesIO(b"")
+        stdout = io.BytesIO(("VIBE_EVENT_" + request["nonce"] + ":" + json.dumps({"session_id": "s", "status": "ended"}) + "\n").encode())
         def wait(self):
             return 0
     monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **k: Stopped())

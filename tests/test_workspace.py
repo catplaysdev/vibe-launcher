@@ -513,9 +513,9 @@ def test_chords_from_inside_a_terminal_are_routed(page, qtbot):
 
 def test_status_comes_from_the_session_record_once_the_terminal_ended(page):
     tab = open_tab(page)
-    assert page.status_for(tab) == ("已開啟", "ok")
+    assert page.status_for(tab)[1] == "unknown"
     page.update_sessions([{"id": "s1", "status": "connecting"}])
-    assert page.status_for(tab) == ("已開啟", "ok"), "while we are inside, 'connecting' would only mislead"
+    assert page.status_for(tab) == ("連線中", "info"), "the local terminal alone cannot prove remote execution"
     tab.terminal.finish(0)
     page.update_sessions([{"id": "s1", "status": "detached"}])
     assert page.status_for(tab) == ("背景執行", "info")
@@ -561,14 +561,17 @@ def test_switching_terminals_does_not_restyle_or_hide_them(page, monkeypatch):
 # ----------------------------------------------------------------------------- leaving without ending
 
 
-def test_detach_leaves_a_tmux_terminal_and_the_work_keeps_running(page):
+def test_detach_waits_for_control_confirmation_not_title_or_terminal_exit(page):
     tab = open_tab(page)
-    tab.terminal.title_changed.emit("vibe:vibe-s1")           # the server's tmux says we are attached
-    assert tab.attached
+    requests = []
+    page.detach_requested.connect(requests.append)
+    tab.terminal.title_changed.emit("vibe:forged")
     page.detach(tab.info.id)
-    assert tab.terminal.sent == [b"\x02d"], "the app sends tmux's detach (Ctrl+B d), not a kill"
+    assert requests == [tab.info.id] and tab.terminal.sent == []
     assert not tab.terminal.terminated
-    tab.terminal.finish(80)                                   # the runner exits once ssh closes
+    tab.terminal.finish(0)
+    assert page.tab(tab.info.id) is tab and not page.messages
+    page.confirm_detach(tab.info.id, {"status": "detached"})
     assert page.tab(tab.info.id) is None and tab.terminal.disposed
     assert any("仍在伺服器背景執行" in text for text, tone in page.messages)
 
@@ -576,7 +579,8 @@ def test_detach_leaves_a_tmux_terminal_and_the_work_keeps_running(page):
 def test_detach_explains_itself_when_it_cannot_work(page):
     waiting = open_tab(page, session="w")                      # still logging in: tmux is not attached yet
     page.detach(waiting.info.id)
-    assert waiting.terminal.sent == [] and "還沒連上" in page.messages[-1][0]
+    page.confirm_detach(waiting.info.id, {"status": "unknown"})
+    assert waiting.terminal.sent == [] and page.messages[-1][1] == "warn"
     direct = open_tab(page, preset="p3", environment="local", session="d")
     page.detach(direct.info.id)
     assert direct.terminal.sent == [] and "沒有使用 tmux" in page.messages[-1][0]
@@ -587,18 +591,18 @@ def test_closing_a_tmux_terminal_detaches_instead_of_killing(page):
     tab = open_tab(page)
     tab.terminal.title_changed.emit("vibe:vibe-s1")
     page.close_tab(tab.info.id)
-    assert tab.terminal.sent == [b"\x02d"] and not tab.terminal.terminated
+    assert tab.terminal.sent == [] and not tab.terminal.terminated
     tab.terminal.finish(80)
+    page.confirm_detach(tab.info.id, {"status": "detached"})
     assert page.tab(tab.info.id) is None
-    assert not any("仍在伺服器背景執行" in text for text, _ in page.messages), "closing is quieter than the explicit leave"
 
 
-def test_closing_before_attach_just_ends_the_local_connection(page):
+def test_closing_before_attach_does_not_kill_unverified_work(page):
     tab = open_tab(page)
     page.close_tab(tab.info.id)
-    assert tab.terminal.terminated and tab.terminal.sent == []
-    tab.terminal.finish(1)
-    assert page.tab(tab.info.id) is None
+    assert not tab.terminal.terminated and tab.terminal.sent == []
+    page.confirm_detach(tab.info.id, {"status": "unknown"})
+    assert page.tab(tab.info.id) is tab and not tab.closing
 
 
 def test_closing_a_terminal_that_would_lose_work_asks_first(page):
@@ -612,12 +616,13 @@ def test_closing_a_terminal_that_would_lose_work_asks_first(page):
     assert direct.terminal.terminated
 
 
-def test_a_stuck_detach_is_forced_after_the_grace_period(page):
+def test_a_stuck_detach_keeps_the_terminal_and_allows_retry(page):
     tab = open_tab(page)
     tab.terminal.title_changed.emit("vibe:vibe-s1")
     page.detach(tab.info.id)
-    page._force_end(tab.info.id)
-    assert tab.terminal.terminated
+    page.confirm_detach(tab.info.id, {"status": "unknown"})
+    assert not tab.terminal.terminated and not tab.closing
+    assert page.tab(tab.info.id) is tab and page.messages[-1][1] == "warn"
 
 
 def test_an_ended_terminal_keeps_its_output_and_offers_to_reopen(page):
@@ -734,6 +739,7 @@ def window(tmp_path, qtbot):
     store.save("presets", {"id": "p2", "name": "後端", "account_id": "c", "environment_id": "srv", "path": "/w/api", "ask_account": False})
     service = SpawnService()
     view = MainWindow(store, service, terminal_factory=FakeTerminal)
+    view._confirm = lambda *a, **k: True
     # pytest-qt closes widgets *before* fixture teardown, and a window with live terminals asks before closing,
     # so end the terminals first.
     qtbot.addWidget(view, before_close_func=lambda w: w.workspace.shutdown())
@@ -1496,6 +1502,7 @@ def test_after_a_restart_the_last_desktop_offers_its_terminals(tmp_path, qtbot, 
     view.open_terminal("p1", "agent")
     view.workspace.shutdown()
     again = MainWindow(store, service, terminal_factory=FakeTerminal)
+    again._confirm = lambda *a, **k: True
     qtbot.addWidget(again, before_close_func=lambda w: w.workspace.shutdown())
     assert again.workspace.restore_button.isVisibleTo(again.workspace) and "1" in again.workspace.restore_button.text()
     assert again.workspace.tabs() == [], "nothing starts by itself"
@@ -1543,8 +1550,32 @@ def test_restoring_a_project_returns_to_its_workspace(window):
 # ----------------------------------------------------------------------------- review fixes
 def restart(store, service, qtbot):
     again = MainWindow(store, service, terminal_factory=FakeTerminal)
+    again._confirm = lambda *a, **k: True
     qtbot.addWidget(again, before_close_func=lambda w: w.workspace.shutdown())
     return again
+
+
+def test_restore_preview_cancellation_starts_nothing_and_keeps_slots(window):
+    view, store, service = window
+    slots = [{"preset_id": "p1", "kind": "agent", "account_id": "a"}]
+    previews = []
+    view._confirm = lambda title, message, **kw: previews.append(message) or False
+    service.calls.clear()
+    view._restore_slots("", slots)
+    assert not service.calls and view._pending_slots[""] == slots
+    assert previews and "重新啟動程式" in previews[0]
+
+
+def test_detach_uses_operation_channel_and_original_attachment(window):
+    view, store, service = window
+    view.open_terminal("p1", "agent")
+    tab = view.workspace.current_tabs()[0]
+    tab.info.attachment_nonce = "attachment"
+    view.workspace.detach(tab.info.id)
+    action, kwargs = service.calls[-1]
+    assert action == "detach" and kwargs["session_id"] == tab.info.session_id
+    assert kwargs["operation"] == {"attachment_nonce": "attachment"}
+    assert tab.terminal.sent == [] and not tab.terminal.terminated
 
 
 def test_the_default_desktop_survives_a_restart_on_another_desktop(window, qtbot):
@@ -1597,6 +1628,118 @@ def test_restoring_does_not_open_a_second_copy_of_an_open_terminal(window, qtbot
     service.calls.clear()
     again.restore_pending("")
     assert service.calls == [] and len(again.workspace.current_tabs()) == 1
+
+
+def test_opening_a_saved_terminal_by_hand_does_not_accumulate_restore_slots(window, qtbot):
+    view, store, service = window
+    view.open_terminal("p1", "agent")
+    view.workspace.shutdown()
+    for _ in range(3):
+        view = restart(store, service, qtbot)
+        assert len(view._pending_slots[""]) == 1
+        view.open_terminal("p1", "agent")
+        assert not view._pending_slots.get("")
+        view.workspace.set_layout("grid")
+        view._remember_workspaces()
+        assert len(view.prefs.default_workspace["slots"]) == 1
+        tab = view.workspace.current_tabs()[0]
+        tab.terminal.finish(1)
+        view.workspace.close_tab(tab.info.id)
+        assert view.prefs.default_workspace["slots"] == []
+        view.open_terminal("p1", "agent")
+        view.workspace.shutdown()
+
+
+def test_pending_slots_are_consumed_once_and_other_sessions_can_still_restore(window):
+    view, store, service = window
+    slots = [{"preset_id": "p1", "kind": "agent", "account_id": "a", "session_id": sid} for sid in ("first", "second")]
+    view._pending_slots[""] = slots
+    view.workspace.set_pending("", 2)
+    view.open_terminal("p1", "agent")
+    assert len(view._pending_slots[""]) == 1
+    view._on_terminals_changed()
+    view._remember_workspaces()
+    assert len(view._pending_slots[""]) == 1
+    view.restore_pending("")
+    assert len(view.workspace.current_tabs()) == 2
+    assert not view._pending_slots.get("")
+    assert len(view.prefs.default_workspace["slots"]) == 2
+
+
+@pytest.mark.parametrize("workspace_id", ["", "one"])
+def test_discard_saved_terminals_is_confirmed_persistent_and_keeps_open_work(window, qtbot, workspace_id):
+    view, store, service = window
+    if workspace_id:
+        store.save("workspaces", {"id": workspace_id, "name": "One", "slots": []})
+        view.reload()
+        view.open_workspace(workspace_id)
+    view.open_terminal("p1", "agent")
+    tab = view.workspace.current_tabs()[0]
+    slots = [{"preset_id": "p2", "kind": "shell"}]
+    view._pending_slots[workspace_id] = slots
+    view.workspace.set_pending(workspace_id, 1)
+    view._confirm = lambda *args, **kwargs: False
+    view.discard_pending(workspace_id)
+    assert view._pending_slots[workspace_id] == slots
+    view._confirm = lambda *args, **kwargs: True
+    calls = len(service.calls)
+    action = next(action for action in view.workspace.workspace_menu_actions() if action.text == "丟棄待恢復終端…")
+    assert action.enabled
+    action.callback()
+    assert not view._pending_slots.get(workspace_id) and workspace_id not in view.workspace._pending
+    assert len(service.calls) == calls and tab.alive() and not tab.terminal.terminated
+    saved = store.get("workspaces", workspace_id) if workspace_id else view.prefs.default_workspace
+    assert [slot["preset_id"] for slot in saved["slots"]] == ["p1"]
+    view.workspace.shutdown()
+    again = restart(store, service, qtbot)
+    assert [slot["preset_id"] for slot in again._pending_slots[workspace_id]] == ["p1"]
+
+
+def test_duplicate_saved_slots_of_one_session_come_back_once_and_are_cleaned_when_saved(window):
+    view, store, service = window
+    one = {"preset_id": "p1", "kind": "agent", "account_id": "a", "session_id": "s1", "environment_id": "srv"}
+    two = {**one, "session_id": "s2"}
+    shell = {"preset_id": "p1", "kind": "shell", "environment_id": "srv", "terminal_profile": "bash"}
+    view.prefs.default_workspace = {"layout": "tabs", "slots": [one, two, shell, dict(one), dict(two), dict(shell)]}
+    view._restore_last_desktop()
+    # A session is one terminal; shells have no identity, so they are never merged.
+    assert [slot.get("session_id") for slot in view._pending_slots[""]] == ["s1", "s2", None, None]
+    assert view.workspace._pending[""] == 4
+    view._remember_workspaces()
+    assert [slot.get("session_id") for slot in view.prefs.default_workspace["slots"]] == ["s1", "s2", None, None]
+
+
+def test_discard_button_sits_next_to_restore_and_follows_pending_saved_terminals(window):
+    view, store, service = window
+    page = view.workspace
+    assert page.restore_button.isHidden() and page.discard_button.isHidden()
+    view._pending_slots[""] = [{"preset_id": "p1", "kind": "agent", "account_id": "a"}]
+    page.set_pending("", 1)
+    assert not page.restore_button.isHidden() and not page.discard_button.isHidden()
+    asked = []
+    view._confirm = lambda *args, **kwargs: asked.append(args) or True
+    page.discard_button.click()
+    assert asked and not view._pending_slots.get("") and page.discard_button.isHidden() and page.restore_button.isHidden()
+    assert view.prefs.default_workspace["slots"] == []
+
+
+def test_failed_restore_retries_do_not_accumulate_pending_entries(window):
+    view, store, service = window
+    view._pending_slots[""] = [{"preset_id": "p1", "kind": "agent", "account_id": "a"}]
+    for _ in range(3):
+        service.fail = ValueError("Cannot start this terminal")
+        view.restore_pending("")
+        assert len(view._pending_slots[""]) == 1
+        assert len(view.prefs.default_workspace["slots"]) == 1
+
+
+def test_unrelated_account_or_shell_does_not_consume_saved_agent_slots(window):
+    view, store, service = window
+    slots = [{"preset_id": "p1", "kind": "agent", "account_id": "other"}]
+    view._pending_slots[""] = list(slots)
+    view.open_terminal("p1", "agent")
+    view.open_terminal("p1", "shell")
+    assert view._pending_slots[""] == slots
 
 
 def test_a_direct_ssh_run_without_its_terminal_is_not_shown_as_background(window):

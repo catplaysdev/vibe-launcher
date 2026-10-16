@@ -112,17 +112,17 @@ def windows_user_sid() -> str:
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel.LocalFree.argtypes = [ctypes.c_void_p]
     if not api.OpenProcessToken(wintypes.HANDLE(-1), 8, ctypes.byref(token)):
-        raise OSError("Cannot identify Windows user")
+        raise ctypes.WinError(ctypes.get_last_error(), "Cannot open Windows user token")
     try:
         size = wintypes.DWORD()
         api.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))
         buffer = ctypes.create_string_buffer(size.value)
         if not api.GetTokenInformation(token, 1, buffer, size, ctypes.byref(size)):
-            raise OSError("Cannot identify Windows user")
+            raise ctypes.WinError(ctypes.get_last_error(), "Cannot read Windows user token")
         sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
         text = wintypes.LPWSTR()
         if not api.ConvertSidToStringSidW(sid, ctypes.byref(text)):
-            raise OSError("Cannot identify Windows user")
+            raise ctypes.WinError(ctypes.get_last_error(), "Cannot convert Windows user SID")
         try:
             return text.value
         finally:
@@ -145,10 +145,10 @@ def protect_path(path: Path) -> None:
     flags = "OICI" if path.is_dir() else ""
     sddl = f"D:P(A;{flags};FA;;;{windows_user_sid()})(A;{flags};FA;;;SY)"
     if not api.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), None):
-        raise OSError("Cannot create private data ACL")
+        raise ctypes.WinError(ctypes.get_last_error(), "Cannot create private data ACL")
     try:
         if not api.SetFileSecurityW(str(path), 0x80000004, descriptor):
-            raise OSError("Cannot restrict launcher data ACL")
+            raise ctypes.WinError(ctypes.get_last_error(), "Cannot restrict launcher data ACL")
     finally:
         kernel = ctypes.WinDLL("Kernel32.dll")
         kernel.LocalFree.argtypes = [ctypes.c_void_p]
@@ -216,7 +216,7 @@ def validate_request(request: dict) -> None:
     locale = request.get("language", "en")
     if not isinstance(locale, str) or len(locale) > 32 or not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", locale):
         raise ValueError("Invalid language")
-    if request.get("action") not in {"codex-control", "doctor", "login", "launch", "list-sessions", "attach", "stop", "worker", "check-tools", "update-tool", "quota", "browse", "github", "harness", "import-settings", "import-history"}:
+    if request.get("action") not in {"codex-control", "doctor", "login", "launch", "list-sessions", "attach", "detach", "stop", "worker", "check-tools", "update-tool", "quota", "browse", "github", "harness", "import-settings", "import-history"}:
         raise ValueError("Unsupported action")
     if request.get("action") == "update-tool" and request.get("tool") not in {"codex", "claude"}:
         raise ValueError("Select Codex or Claude")
@@ -224,6 +224,9 @@ def validate_request(request: dict) -> None:
         raise ValueError("Unsupported Snap channel")
     if "persistent" in request and type(request["persistent"]) is not bool:
         raise ValueError("Invalid persistent flag")
+    if request["action"] == "detach":
+        safe_id(request.get("session_id", ""))
+        safe_id(request.get("attachment_nonce", ""))
     if "resume" in request and (type(request["resume"]) is not bool or request.get("action") not in {"launch", "worker"}):
         raise ValueError("Invalid resume flag")
     if request.get("mode", "agent") not in {"agent", "shell"}:
@@ -1745,7 +1748,10 @@ def doctor(request: dict, root: Path) -> None:
         if "tmux" in missing:
             print("tmux keeps remote sessions alive after you disconnect. It is not installed automatically: sudo apt install tmux (Ubuntu/Debian).")
         if any(name.startswith(("codex", "claude")) for name in missing):
-            print("Install the CLI under your home or /usr/local/bin; no PATH editing needed for ~/.local/bin, ~/.npm-global/bin or nvm.")
+            if WINDOWS:
+                print("Install the native Windows CLI for this user. Restart the launcher after installation; .cmd/.bat wrappers are not executable CLIs. Administrator access is not required.")
+            else:
+                print("Install the CLI under your home or /usr/local/bin; no PATH editing needed for ~/.local/bin, ~/.npm-global/bin or nvm.")
             print("Codex: https://developers.openai.com/codex/cli/ ; Claude: https://code.claude.com/docs/en/setup")
         raise RuntimeError("Missing required tools: " + ", ".join(missing))
     emit(request, {"status": "ready"})
@@ -1772,7 +1778,24 @@ RECORDED_ACTIVE = {"running", "detached", "connecting", "waiting_auth"}
 def list_sessions(request: dict, root: Path) -> None:
     windows: dict[str, str] | None = None
     for path in (root / "sessions").glob("*.json"):
-        record = json.loads(read_private(path))
+        try:
+            record = json.loads(read_private(path))
+            if not isinstance(record, dict):
+                raise ValueError("Invalid session record")
+            safe_id(record.get("session_id", ""))
+            if record["session_id"] != path.stem or not isinstance(record.get("environment_id"), str):
+                raise ValueError("Invalid session identity")
+            if record.get("status", "unknown") not in {"queued", "connecting", "waiting_auth", "running", "detached", "ended", "failed", "unknown"}:
+                raise ValueError("Invalid session state")
+        except (OSError, ValueError, TypeError):
+            # One damaged record must not invalidate every other session on the host.
+            print("Cannot read a session record; its state is unknown.", file=sys.stderr, flush=True)
+            try:
+                session_id = safe_id(path.stem)
+            except ValueError:
+                continue
+            emit(request, {"session_id": session_id, "status": "unknown"})
+            continue
         if record.get("environment_id") != request.get("environment_id"):
             continue
         status = record.get("status", "unknown")
@@ -1850,10 +1873,12 @@ def run_worker(request: dict, root: Path, env: dict | None = None) -> int:
         save_status(root, request, "failed")  # the record must not stay "waiting for sign-in" forever
         raise
     save_status(root, request, "running", pid=process.pid)
+    stopping = False
     try:
         while process.poll() is None:
             try:
                 if stop_path.exists():
+                    stopping = True
                     if WINDOWS:
                         subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1867,7 +1892,7 @@ def run_worker(request: dict, root: Path, env: dict | None = None) -> int:
         result = process.wait()
     finally:
         stop_path.unlink(missing_ok=True)
-    save_status(root, request, "ended" if result == 0 or result in USER_QUIT_CODES else "failed")
+    save_status(root, request, "ended" if stopping or result == 0 or result in USER_QUIT_CODES else "failed")
     return result
 
 
@@ -1899,13 +1924,60 @@ def direct_outcome(request: dict, root: Path, result: int) -> int:
     return {"ended": EXIT_SESSION_ENDED, "failed": EXIT_SESSION_FAILED}.get(status, result)
 
 
+STOP_CONFIRM_SECONDS = 5.0
+
+
 def stop_direct_session(request: dict, root: Path, record: dict, record_path: Path) -> int:
     write_json(record_path.with_suffix(".stop"), {"stop_requested": True})
-    if pid_alive(record.get("pid")):
-        os.kill(record["pid"], signal.SIGTERM)
-    save_status(root, record, "ended")
-    emit(request, {"session_id": request["session_id"], "status": "ended"})
-    return 0
+    # Only the owning worker may signal its Popen object. A saved PID may have been reused.
+    deadline = time.monotonic() + STOP_CONFIRM_SECONDS
+    while True:
+        try:
+            current = json.loads(read_private(record_path))
+            if (isinstance(current, dict) and current.get("session_id") == request["session_id"]
+                    and current.get("environment_id") == request["environment_id"]
+                    and current.get("status") in {"ended", "failed"}):
+                emit(request, {"session_id": request["session_id"], "status": current["status"]})
+                return 0
+        except (OSError, ValueError):
+            pass
+        if time.monotonic() >= deadline:
+            emit(request, {"session_id": request["session_id"], "status": "unknown"})
+            print("Stop requested; the worker has not confirmed exit.", flush=True)
+            return 1
+        time.sleep(0.1)
+
+
+def detach_session(request: dict, root: Path) -> int:
+    """Detach exactly one launcher attachment, independently of terminal input/title."""
+    session_id = request["session_id"]
+    view = tmux_name(session_id) + "-" + safe_id(request["attachment_nonce"])[:8]
+    try:
+        record = json.loads(read_private(session_path(root, session_id)))
+        if not isinstance(record, dict) or record.get("session_id") != session_id or record.get("environment_id") != request["environment_id"]:
+            raise RuntimeError("Session environment mismatch")
+        window = tmux_windows().get(session_id)
+        if window is None:
+            status = "unknown"
+            try:
+                record = json.loads(read_private(session_path(root, session_id)))
+                if record.get("environment_id") == request["environment_id"] and record.get("status") in {"ended", "failed"}:
+                    status = record["status"]
+            except (OSError, ValueError, AttributeError):
+                pass
+        else:
+            linked = tmux("list-windows", "-t", "=" + view, "-F", "#{window_id}", capture=True)
+            if linked.returncode or window not in (linked.stdout or b"").decode("ascii", "replace").splitlines():
+                status = "unknown"
+            else:
+                result = tmux("detach-client", "-s", "=" + view, capture=True)
+                clients = tmux("list-clients", "-F", "#{session_name}", capture=True)
+                remaining = (clients.stdout or b"").decode("utf-8", "replace").splitlines()
+                status = "detached" if not result.returncode and not clients.returncode and view not in remaining and tmux_session_exists(session_id) else "unknown"
+    except (RuntimeError, OSError, ValueError):
+        status = "unknown"
+    operation_result(request, root, {"status": status})
+    return 0 if status in {"detached", "ended", "failed"} else 1
 
 
 def session_outcome(request: dict, root: Path, attach_code: int) -> int:
@@ -1963,8 +2035,7 @@ def session_action(request: dict, root: Path) -> int:
         if action == "attach":
             print("Local CLI is in its original terminal. Use that window; only SSH supports reattach.")
         else:
-            record_path.with_suffix(".stop").touch(mode=0o600)
-            print("Stop requested. The original worker will stop its own CLI process.")
+            return stop_direct_session(request, root, record, record_path)
         return 0
     attached = attach_terminal(request)
     return session_outcome(request, root, 1 if attached is None else attached)
@@ -2037,6 +2108,8 @@ def perform(request: dict, root: Path) -> int:
     if action == "list-sessions":
         list_sessions(request, root)
         return 0
+    if action == "detach":
+        return detach_session(request, root)
     if action in {"attach", "stop"}:
         if action == "stop" and request.get("session_ids"):
             worst = 0
@@ -3667,6 +3740,9 @@ class ManagedCodexBridge:
         self._process: Any = None
         self._listener: socket.socket | None = None
         self._frontend: socket.socket | None = None
+        self._pickers: set[socket.socket] = set()
+        self._picker_requests = 0
+        self._initialize_result: dict | None = None
         self._capability = secrets.token_urlsafe(32)
         self._closed = False
         self._generation = 0
@@ -3759,7 +3835,7 @@ class ManagedCodexBridge:
         return self.snapshot()
 
     def _safe(self) -> bool:
-        return bool(self._thread_id and self._init is not None and self._settings
+        return bool(not self._picker_requests and self._thread_id and self._init is not None and self._settings
                     and self._state == "idle" and not self._pending and not self._tools
                     and not self._approvals and not self._child_unknown and not self._switching
                     and not self._settings_unknown and self._turn_id is None and not self._side_turns)
@@ -4021,15 +4097,28 @@ class ManagedCodexBridge:
             if entry and "result" in message:
                 request_method, _request_params, _ = entry
                 result = message["result"]
+                if request_method == "initialize":
+                    self._initialize_result = copy.deepcopy(result)
                 if request_method in ("thread/start", "thread/resume"):
                     thread = result.get("thread", {})
                     new_id = thread.get("id")
                     if side and thread.get("ephemeral") is True and isinstance(new_id, str) and new_id != self._thread_id:
                         self._side_threads.add(new_id)
                         return
-                    if self._thread_id and self._thread_id != new_id:
-                        self._attention(tr("Terminal selected a different conversation"))
+                    if request_method == "thread/resume" and new_id != _request_params.get("threadId"):
+                        self._attention(tr("Target resumed a different thread"))
                         return
+                    if self._thread_id and self._thread_id != new_id:
+                        # A user-selected native /resume replaces the controlled conversation only after success.
+                        self._turn_id = self._last_turn_status = self._last_error_kind = self._last_error_at = None
+                        self._continuation_ready = False
+                        self._continuation_until = 0.0
+                        self._extra.clear()
+                        self._verify.clear()
+                        self._settings_unknown = False
+                        self._blocked = None
+                        self._pending_account = None
+                        self._reason = ""
                     self._thread_id = new_id
                     self._settings = self._settings_from(result)
                     self._state = "idle" if thread.get("status", {}).get("type") == "idle" else "unknown"
@@ -4039,6 +4128,10 @@ class ManagedCodexBridge:
         event_thread = params.get("threadId")
         if method == "thread/started":
             event_thread = params.get("thread", {}).get("id")
+            if any(name == "thread/resume" and args.get("threadId") == event_thread
+                   or name == "thread/start" and not self._tool_free_side_thread(args)
+                   for name, args, _ in self._pending.values()):
+                return  # bind from the matching response, never from unsolicited terminal events
             if (self._side_requests and params.get("thread", {}).get("ephemeral") is True
                     and isinstance(event_thread, str) and event_thread != self._thread_id):
                 self._side_threads.add(event_thread)     # announced before the reply to its tool-free request
@@ -4161,6 +4254,16 @@ class ManagedCodexBridge:
                 if len(self._pending) >= 256:
                     raise CodexControlError("Too many outstanding native requests")
                 params = message.get("params") or {}
+                replacing = (self._thread_id and ((method == "thread/resume" and params.get("threadId") != self._thread_id)
+                             or (method == "thread/start" and not self._tool_free_side_thread(params))))
+                can_replace = (not self._switching and not self._picker_requests and not self._pending
+                               and not self._tools and not self._approvals and not self._child_unknown
+                               and self._turn_id is None and not self._side_turns
+                               and (self._state == "idle" or self._last_turn_status in {"failed", "interrupted"}))
+                if replacing and not can_replace:
+                    self._send_front({"id": identifier, "error": {"code": -32000,
+                        "message": tr("Finish the current turn and approvals before changing conversations")}})
+                    return
                 self._pending[identifier] = (method, params, time.monotonic())
                 if method == "initialize":
                     self._init = copy.deepcopy(params)
@@ -4174,6 +4277,39 @@ class ManagedCodexBridge:
             elif method is None:
                 self._approvals.discard(identifier)
         self._write(message)
+
+    def _picker_message(self, conn: socket.socket, message: dict) -> None:
+        """The native /resume picker opens a second, read-only app-server connection."""
+        method, identifier = message.get("method"), message.get("id")
+        if identifier is None:
+            return
+        allowed = {"config/read", "thread/list", "thread/read", "thread/turns/list", "thread/items/list", "account/read"}
+        with self._lock:
+            if self._switching or self._initialize_result is None:
+                result = {"error": {"code": -32000, "message": "Native session is not ready; retry the picker"}}
+            elif method == "initialize":
+                result = {"result": copy.deepcopy(self._initialize_result)}
+            elif method not in allowed:
+                result = {"error": {"code": -32601, "message": "Picker connections only support history reads"}}
+            else:
+                result = None
+                self._picker_requests += 1
+        if result is None:
+            try:
+                # Internal IDs are unique across sockets, including two clients both sending id=1.
+                result = {"result": self._rpc(method, message.get("params") or {})}
+            except CodexControlError as error:
+                result = {"error": {"code": -32000, "message": str(error)}}
+            finally:
+                with self._lock:
+                    self._picker_requests -= 1
+        payload = json.dumps({"id": identifier, **result}, ensure_ascii=False).encode("utf-8")
+        if len(payload) > _BRIDGE_LIMIT:
+            raise CodexControlError("Native message exceeds size limit")
+        with self._front_write:
+            chunks = [payload[start:start + _BRIDGE_FRAME] for start in range(0, len(payload), _BRIDGE_FRAME)] or [b""]
+            for index, chunk in enumerate(chunks):
+                self._frame(conn, 0 if index else 1, chunk, final=index == len(chunks) - 1)
 
     def _send_front(self, message: dict[str, Any]) -> None:
         payload = json.dumps(message, ensure_ascii=False).encode("utf-8")
@@ -4258,11 +4394,11 @@ class ManagedCodexBridge:
                 conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
                 return
             with self._lock:
-                if self._frontend is not None:
-                    conn.sendall(b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\n\r\n")
-                    return
-                self._frontend = conn
-                owned = True
+                if self._frontend is None:
+                    self._frontend = conn
+                    owned = True
+                else:
+                    self._pickers.add(conn)
             accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest())
             conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept + b"\r\n\r\n")
             conn.settimeout(self._deadline)
@@ -4318,7 +4454,10 @@ class ManagedCodexBridge:
                     fragments.clear()
                     if not isinstance(message, dict):
                         raise CodexControlError("Invalid native client message")
-                    self._frontend_message(message)
+                    if owned:
+                        self._frontend_message(message)
+                    else:
+                        self._picker_message(conn, message)
         except Exception:
             if owned:
                 with self._lock:
@@ -4327,6 +4466,7 @@ class ManagedCodexBridge:
             with self._lock:
                 if owned and self._frontend is conn:
                     self._frontend = None
+                self._pickers.discard(conn)
             conn.close()
             self._client_slots.release()
 
@@ -4363,6 +4503,8 @@ class ManagedCodexBridge:
                 self._listener.close()
             if self._frontend:
                 self._frontend.close()
+            for picker in self._pickers:
+                picker.close()
         try:
             self._stop_backend()
         except CodexControlError:

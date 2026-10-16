@@ -298,7 +298,7 @@ def run_remote(store: Store, request: dict, environment: dict) -> int:
                         pass
                 # Interactive CLI output is never a control channel. Only the
                 # non-PTY list helper can report state, committed after exit 0.
-                if request["action"] == "list-sessions" and line.startswith(marker):
+                if request["action"] in {"list-sessions", "stop"} and line.startswith(marker):
                     try:
                         event = json.loads(line[len(marker):].strip())
                         if isinstance(event, dict) and "auth_status" not in event and len(events) < 10000:
@@ -323,6 +323,16 @@ def run_remote(store: Store, request: dict, environment: dict) -> int:
             runtime.write_json(runtime.quota_file(store.path.parent, request["account"]["id"], request["environment_id"]),
                                {**quota_report, "account_id": request["account"]["id"],
                                 "environment_id": request["environment_id"]})
+        if operation_report is not None and request["action"] == "detach":
+            runtime.write_json(store.path.parent / "results" / (runtime.safe_id(request["operation_id"]) + ".json"), operation_report)
+        if request["action"] == "stop":
+            for event in events:
+                record_event(store, request, event)
+            confirmed = {event.get("session_id") for event in events if event.get("status") in {"ended", "failed"}}
+            for stopped in request.get("session_ids") or [request.get("session_id")]:
+                if stopped not in confirmed:
+                    record_event(store, dict(request, session_id=stopped), {"status": "unknown"})
+                    code = code or 1
         if code == 0:
             if operation_report is not None:
                 runtime.write_json(store.path.parent / "results" / (runtime.safe_id(request["operation_id"]) + ".json"), operation_report)
@@ -334,9 +344,6 @@ def run_remote(store: Store, request: dict, environment: dict) -> int:
                 record_event(store, request, {"auth_status": "configured" if request["account"]["auth"] == "api" else "authenticated"})
             if request["action"] in {"launch", "attach"} and not outcome:
                 record_event(store, request, {"status": "unknown"})
-            if request["action"] == "stop":
-                for stopped in request.get("session_ids") or [request.get("session_id")]:
-                    record_event(store, dict(request, session_id=stopped), {"status": "ended"})
     except KeyboardInterrupt:
         if process is not None:
             process.terminate()
@@ -411,8 +418,22 @@ def main() -> int:
         # A failed stop/attach cannot prove that the existing remote worker ended.
         status = "unknown" if environment["kind"] == "ssh" and request["action"] in {"stop", "attach"} else "failed"
         record_event(store, request, {"status": status})
-        print("Operation failed: " + (str(error) if isinstance(error, (ValueError, RuntimeError))
-                                     else type(error).__name__))
+        if isinstance(error, OSError):
+            # strerror and numeric codes identify launch/ACL failures without dumping argv or environment secrets.
+            detail = str(error.strerror or type(error).__name__)[:300]
+            number = getattr(error, "winerror", None) or error.errno
+            # Only our function name is diagnostic data: never expose stack locals,
+            # paths, command lines or subprocess exception text (which may contain keys).
+            step = "perform"
+            trace = error.__traceback__
+            while trace is not None:
+                if trace.tb_frame.f_globals.get("__name__") == runtime.__name__:
+                    step = trace.tb_frame.f_code.co_name
+                trace = trace.tb_next
+            print(f"Operation failed: {detail} (system error {number}; step {step})")
+        else:
+            print("Operation failed: " + (str(error) if isinstance(error, (ValueError, RuntimeError))
+                                         else type(error).__name__))
     report = {}
     if request.get("operation_id"):
         result_path = store.path.parent / "results" / (runtime.safe_id(request["operation_id"]) + ".json")

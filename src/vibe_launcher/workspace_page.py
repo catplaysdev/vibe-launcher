@@ -37,11 +37,10 @@ SUB_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 KIND_ROLE = int(Qt.ItemDataRole.UserRole) + 3
 PRESET_ROLE = int(Qt.ItemDataRole.UserRole) + 4
 GLYPH_ROLE = int(Qt.ItemDataRole.UserRole) + 5
-DETACH_GRACE_MS = 4000
 TOOL_LABEL = {"codex": "Codex", "claude": "Claude", "shell": tr("Terminal")}
 # One-shot jobs that report their result elsewhere (a dialog, the environment cards, a toast). A clean exit closes
 # their terminal; a failure keeps it so the output can be read.
-BACKGROUND_ACTIONS = {"github", "harness", "import-settings", "import-history", "doctor", "ssh-settings", "check-tools",
+BACKGROUND_ACTIONS = {"detach", "github", "harness", "import-settings", "import-history", "doctor", "ssh-settings", "check-tools",
                       "refresh", "stop", "quota", "codex-control"}
 WORKSPACE_GLYPH = "briefcase"          # a desktop's icon until the user picks one
 DEFAULT_ICON_KEY = "@default"          # icon key of the unsaved default desktop (saved ids never contain "@")
@@ -70,6 +69,7 @@ class TabInfo:
     terminal_profile: str = ""
     workspace_id: str = ""
     resume_thread_id: str = ""
+    attachment_nonce: str = ""
 
     @property
     def background(self) -> bool:
@@ -86,7 +86,6 @@ class Tab:
     pane: "TerminalPane"
     exit_code: int | None = None
     closing: str = ""              # "" | "detach" | "close"
-    attached: bool = False         # the server's tmux told us (via its title) that we are attached to the session
     login_status: str | None = None
 
     @property
@@ -605,6 +604,7 @@ class ProjectLauncher(QWidget):
 
 
 class WorkspacePage(QWidget):
+    detach_requested = Signal(str)
     quota_policy_requested = Signal(str, object)
     account_switch_requested = Signal(str, object)
     launch_requested = Signal(str, str, str, str)   # preset_id, kind, account_id, environment_id
@@ -614,6 +614,7 @@ class WorkspacePage(QWidget):
     new_workspace_requested = Signal()
     edit_workspace_requested = Signal(str)
     restore_pending_requested = Signal(str)          # workspace id: bring back last time's terminals
+    discard_pending_requested = Signal(str)          # forget saved slots without stopping workers
     reload_requested = Signal(str)                   # tab id, after the user confirmed
     open_workspace_requested = Signal(str)
     delete_workspace_requested = Signal(str)
@@ -672,6 +673,12 @@ class WorkspacePage(QWidget):
         self.restore_button.clicked.connect(lambda: self.restore_pending_requested.emit(self.workspace_id))
         self.restore_button.hide()
         self.header.add_action(self.restore_button)
+        # Next to Restore, so "never bring these back" is as easy to find as "bring them back".
+        self.discard_button = make_button("", "ghost", "trash", tip=tr("Discard saved terminals…"))
+        self.discard_button.setAccessibleName(tr("Discard saved terminals…"))
+        self.discard_button.clicked.connect(lambda: self.discard_pending_requested.emit(self.workspace_id))
+        self.discard_button.hide()
+        self.header.add_action(self.discard_button)
         self.header.add_action(self.workspace_button)
         self.header.add_action(self.palette_button)
         root.addWidget(self.header)
@@ -943,7 +950,8 @@ class WorkspacePage(QWidget):
             environment=environment_name(env), kind=kind, tool=tool, preset_id=str(preset.get("id", "")),
             account_id=str(account.get("id", "")), environment_id=str(env_id), session_id=str(ctx.get("session_id") or ""),
             tmux=bool(persistent and not local and kind in {"agent", "shell", "attach"}), local=local,
-            operation_id=str(ctx.get("operation_id") or ""), login_operation=ctx.get("login_operation") is True, action=str(action),
+            operation_id=str(ctx.get("operation_id") or ""), attachment_nonce=str(ctx.get("attachment_nonce") or ""),
+            login_operation=ctx.get("login_operation") is True, action=str(action),
             terminal_profile=str(ctx.get("terminal_profile") or session.get("terminal_profile") or ""),
             account_name=str(ctx.get("operation_account_name") or account.get("name") or account.get("id") or "") if kind != "shell" else "")
 
@@ -1001,7 +1009,10 @@ class WorkspacePage(QWidget):
     def status_for(self, tab: Tab) -> tuple[str, str]:
         record = self._sessions.get(tab.info.session_id, {})
         if tab.alive():
-            return (tr('workspace_page.a0ca5fde1186'), "ok") if not tab.closing else (tr('workspace_page.7adcaca91bf8'), "info")
+            if tab.closing:
+                return (tr('workspace_page.7adcaca91bf8'), "info")
+            known = record.get("status", "unknown")
+            return env_state.session_badge(known) if known in env_state.SESSION_STATUS else (tr("Terminal connected; work status unknown"), "unknown")
         known = str(record.get("status", ""))
         if known in {"ended", "detached", "failed"}:
             return env_state.session_badge(known)
@@ -1036,10 +1047,8 @@ class WorkspacePage(QWidget):
 
     # -- events -------------------------------------------------------------------------------
     def _on_title(self, tab_id: str, text: str) -> None:
-        tab = self._tabs.get(tab_id)
-        if tab is not None:
-            tab.attached = text.startswith("vibe:")
-            self._rebuild_rail()
+        # Titles are untrusted terminal data, never attachment or execution evidence.
+        pass
 
     def _on_chord(self, name: str) -> None:
         if name == "next":
@@ -1075,9 +1084,8 @@ class WorkspacePage(QWidget):
             return
         tab.exit_code = code
         if tab.closing:
-            self._remove(tab_id)
-            if tab.closing == "detach":
-                self.notify.emit(tr('workspace_page.ffce76e01e11', v0=f'{tab.info.project}', v1=f'{tab.info.title}'), "ok")
+            if tab.closing == "close":
+                self._remove(tab_id)
             return
         if self._finish_login(tab_id) or self._finish_background(tab_id):
             return
@@ -1120,10 +1128,26 @@ class WorkspacePage(QWidget):
 
     # -- leave / close ------------------------------------------------------------------------
     def _send_detach(self, tab: Tab, reason: str) -> None:
-        tab.closing = reason
-        tab.terminal.detach_tmux()
+        if tab.closing:
+            return
+        tab.closing = "detach"
         self._refresh_tab(tab)
-        later(self, DETACH_GRACE_MS, lambda: self._force_end(tab.info.id))
+        self.detach_requested.emit(tab.info.id)
+
+    def confirm_detach(self, tab_id: str, result: dict) -> None:
+        tab = self._tabs.get(tab_id)
+        if tab is None or tab.closing != "detach":
+            return
+        status = result.get("status", "unknown")
+        if status in {"detached", "ended", "failed"}:
+            self._remove(tab_id)
+            text = (tr('workspace_page.ffce76e01e11', v0=tab.info.project, v1=tab.info.title)
+                    if status == "detached" else tr("The remote program has exited."))
+            self.notify.emit(text, "ok" if status != "failed" else "warn")
+        else:
+            tab.closing = ""
+            self._refresh_tab(tab)
+            self.notify.emit(tr("Detach could not be confirmed. The terminal was kept; refresh sessions or retry."), "warn")
 
     def detach(self, tab_id: str) -> None:
         """Leave the terminal but let the server keep working (tmux detach). Terminals without tmux cannot do that."""
@@ -1132,9 +1156,6 @@ class WorkspacePage(QWidget):
             return
         if not tab.info.tmux:
             self.notify.emit(tr('workspace_page.f969d25e2b4b'), "warn")
-            return
-        if not tab.attached:
-            self.notify.emit(tr('workspace_page.185651ed0829'), "warn")
             return
         self._send_detach(tab, "detach")
 
@@ -1145,7 +1166,7 @@ class WorkspacePage(QWidget):
         if not tab.alive():
             self._remove(tab_id)
             return
-        if tab.info.tmux and tab.attached:
+        if tab.info.tmux:
             self._send_detach(tab, "close")      # leave cleanly: the server keeps the work and the state is recorded
             return
         if not tab.info.tmux and confirm and not self._confirm(
@@ -1155,11 +1176,6 @@ class WorkspacePage(QWidget):
         # not attached to a server-side session yet (still logging in) or no tmux at all
         tab.closing = "close"
         tab.terminal.terminate()
-
-    def _force_end(self, tab_id: str) -> None:
-        tab = self._tabs.get(tab_id)
-        if tab is not None and tab.alive():
-            tab.terminal.terminate()
 
     def _remove(self, tab_id: str) -> None:
         tab = self._tabs.pop(tab_id, None)
@@ -1226,6 +1242,7 @@ class WorkspacePage(QWidget):
     def _sync_restore_button(self) -> None:
         count = self._pending.get(self.workspace_id, 0)
         self.restore_button.setVisible(count > 0)
+        self.discard_button.setVisible(count > 0)
         self.restore_button.setText(tr("Restore {count} terminal(s)", count=count))
 
     # -- reload and send, with confirmations the user may switch off ------------------------------------------
@@ -1284,7 +1301,7 @@ class WorkspacePage(QWidget):
         self.rail.setVisible(bool(rows))
         self.rail_hint.setVisible(not rows)
         signature = [(kind, value, self.status_for(self._tabs[value]) if kind == "tab" else None,
-                        (self._tabs[value].attached, self._tabs[value].info.account_name) if kind == "tab" else None) for kind, value in rows]
+                        self._tabs[value].info.account_name if kind == "tab" else None) for kind, value in rows]
         if signature == getattr(self.rail, "_signature", None):
             return
         self.rail._signature = signature
@@ -1304,7 +1321,7 @@ class WorkspacePage(QWidget):
                 item.setData(KIND_ROLE, tab.info.tool if tab.info.tool == "shell" else "agent")
                 item.setData(GLYPH_ROLE, "square-terminal" if tab.info.tool == "shell" else TOOL_ICONS.get(tab.info.tool, "terminal"))
                 item.setData(BADGE_ROLE, self.status_for(tab))
-                where = " · ".join(filter(None, (tab.info.account_name, tab.info.environment))) + (" · tmux" if tab.info.tmux and tab.attached else "")
+                where = " · ".join(filter(None, (tab.info.account_name, tab.info.environment))) + (" · tmux" if tab.info.tmux else "")
                 item.setData(SUB_ROLE, where)
                 item.setToolTip(f"{tab.info.project} · {tab.info.title}\n{where}")
             self.rail.addItem(item)
@@ -1435,6 +1452,8 @@ class WorkspacePage(QWidget):
     def workspace_menu_actions(self) -> list[MenuAction]:
         editable = not self.workspace_id or any(w.get("id") == self.workspace_id for w in self._workspaces)
         actions = [MenuAction(tr("New workspace"), self.new_workspace_requested.emit, "plus"),
+                   MenuAction(tr("Discard saved terminals…"), lambda: self.discard_pending_requested.emit(self.workspace_id), "trash",
+                              danger=True, enabled=self._pending.get(self.workspace_id, 0) > 0),
                    MenuAction(tr("Edit name and icon…"), lambda: self.edit_workspace_requested.emit(self.workspace_id), "pencil",
                               enabled=editable),
                    MenuAction(tr('workspace_page.cb82ec9c831c'), self.save_workspace_requested.emit, "save", separator_before=True)]

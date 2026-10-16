@@ -1,5 +1,7 @@
 # Vibe Launcher
 
+终端可靠性修正：断开连接与停止操作等待确认结果；显示故障时保留程序并提示输出缺失。受管理的 Codex 终端支持原生 `/resume` 历史选择器。手动打开终端会扣除对应的待恢复项目，工作区菜单可丢弃不需要的待恢复终端。
+
 [English](README.md) | [繁體中文](README.zh-TW.md) | 简体中文
 
 桌面启动器，在本机或 Linux SSH 主机上打开官方 **Codex CLI** 与 **Claude Code**。

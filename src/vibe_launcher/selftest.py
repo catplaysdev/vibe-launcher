@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -68,6 +69,37 @@ def run() -> dict:
         checks["terminal_engine"] = True
     except ImportError:
         checks["terminal_engine"] = False
+    if checks["terminal_available"] and checks["terminal_engine"] and os.name == "nt":
+        # Availability/imports alone never proved that the packaged GUI could actually launch a child.
+        widget = terminal.TerminalWidget()
+        output = bytearray()
+        queue_output = widget._queue_output
+        def collect(data):
+            output.extend(data)
+            queue_output(data)
+        widget._queue_output = collect
+        try:
+            widget.resize(640, 360)
+            widget.show()
+            with tempfile.TemporaryDirectory() as probe_folder:
+                probe = Path(probe_folder)
+                database = probe / "probe.sqlite3"
+                Store(database)
+                job = probe / "jobs" / "terminal-probe.json"
+                # Shell diagnostics require no agent install, sign-in or external connection.
+                runtime.write_json(job, {"database": str(database),
+                    "request": {"action": "doctor", "mode": "shell", "environment_id": "local", "nonce": "probe"},
+                    "environment": {"id": "local", "name": "Local", "kind": "local"}})
+                widget.start(selfcmd.command("runner", str(job)), env={**os.environ, "VIBE_EMBEDDED": "1"})
+                deadline = time.monotonic() + 20
+                while not widget.is_output_drained and time.monotonic() < deadline:
+                    app.processEvents()
+                    time.sleep(0.01)
+                checks["terminal_child"] = widget.exit_code == 0 and b"Operation finished (exit 0)" in output and widget.is_output_drained
+        finally:
+            widget.dispose()
+            widget.deleteLater()
+            app.processEvents()
     checks["ok"] = all(v for k, v in checks.items() if k not in {"version", "frozen"})
     return checks
 

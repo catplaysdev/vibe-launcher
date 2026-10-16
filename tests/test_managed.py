@@ -152,16 +152,49 @@ def test_a_source_that_cannot_be_restored_leaves_nothing_running(managed):
     conn.close()
 
 
-def test_two_owners_and_bad_auth_rejected(managed):
+def test_bad_auth_rejected_and_picker_is_read_only(managed):
     _bridge, endpoint, capability, _ = managed
     bad, header = _connect(endpoint, "wrong-secret")
     assert b"403" in header
     bad.close()
     conn, header = _connect(endpoint, capability)
     assert b"101" in header
+    _initialize(conn)
     second, header = _connect(endpoint, capability)
-    assert b"409" in header
+    assert b"101" in header
+    _send(second, {"id": 1, "method": "initialize", "params": {}})
+    assert "result" in _receive(second)[1]
+    _send(second, {"method": "initialized"})
+    _send(second, {"id": 2, "method": "thread/list", "params": {}})
+    _send(conn, {"id": 3, "method": "account/read", "params": {}})
+    assert _receive(second)[1] == {"id": 2, "result": {}}
+    assert _receive(conn)[1]["id"] == 3
+    _send(second, {"id": 3, "method": "turn/start", "params": {"threadId": "other"}})
+    assert "error" in _receive(second)[1]
     second.close()
+    _send(conn, {"id": 4, "method": "account/read", "params": {}})
+    assert _receive(conn)[1]["id"] == 4
+    assert _bridge.snapshot()["thread_id"] == "thread-one"
+    conn.close()
+
+
+def test_resume_rebinds_after_success_and_refuses_an_active_turn(managed):
+    bridge, endpoint, capability, _ = managed
+    conn, _ = _connect(endpoint, capability)
+    _initialize(conn)
+    with bridge._lock:
+        bridge._thread_id = "old-thread"
+        bridge._settings_unknown = True  # a native permission profile blocks handoff, not user-selected history
+        bridge._last_error_kind = "quota"
+        bridge._continuation_ready = True
+    _send(conn, {"id": 3, "method": "thread/resume", "params": {"threadId": "thread-one"}})
+    assert _receive(conn)[1]["result"]["thread"]["id"] == "thread-one"
+    assert bridge.snapshot()["thread_id"] == "thread-one"
+    assert not bridge.snapshot()["continuation_ready"]
+    bridge._observe({"method": "turn/started", "params": {"threadId": "thread-one", "turn": {"id": "active"}}})
+    _send(conn, {"id": 4, "method": "thread/resume", "params": {"threadId": "other"}})
+    assert "error" in _receive(conn)[1]
+    assert bridge.snapshot()["thread_id"] == "thread-one"
     conn.close()
 
 
