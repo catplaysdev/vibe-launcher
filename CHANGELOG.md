@@ -4,6 +4,32 @@
 每個版本一節：`## [x.y.z] - YYYY-MM-DD`，先條列中文重點，再以 `### English` 小節條列相同內容的英文；更新資訊依系統顯示語言選擇，繁體中文系統顯示中文，其餘一律英文，並可複製兩種語言的全文。
 目前仍在開發階段，不保留舊版相容，設定或資料庫欄位的移除直接寫在條列中即可。
 
+## [Unreleased]
+
+- 修正：手動開啟終端後扣除相符的待恢復項目，避免跨重啟重複累加；同專案多終端仍可分別恢復。工作區選單新增確認後丟棄待恢復終端，保留執行中的工作與對話紀錄。
+- 修正：舊版已重複儲存的待恢復項目（同一個 session 出現多筆）在啟動、儲存與恢復時合併為一筆，不再一次開出十幾個終端。「丟棄待恢復終端」另在「恢復 N 個終端」旁加上按鈕。
+- 改善：多個終端同時恢復時，顯示引擎的等待時間由 10 秒延長為 45 秒，降低冷啟動尚未完成便被判定失敗、子程序未啟動而停在「排隊中」的機會。
+
+- 修正：受管理 Codex 的 `/resume` 紀錄選單需要第二條唯讀連線，原本遭 bridge 拒絕；選擇另一段對話後同步更新管理狀態。
+- 修正：停止操作等待 worker 確認，不再直接依歷史 PID 送訊號或提早宣告結束；損壞的 session 紀錄不再中斷整批查詢。
+- 修正：內建終端輸入改由有界佇列寫入；顯示故障時保留工作、解除輸出阻塞並提示輸出缺漏；啟動失敗顯示系統錯誤資訊。封裝自測實際啟動終端子程序。
+- 修正：離開 tmux 改用獨立控制操作確認結果，不再依賴標題或按鍵；恢復包含重新啟動時先列出操作並確認。
+- 診斷：Windows 使用者識別與私有資料 ACL 失敗保留原生錯誤碼；本機啟動失敗顯示失敗函式，避免只看到 `OSError`。
+- 已知問題：部分環境安裝後首次啟動仍可能出現 `OSError`；關閉後以一般身分重開可暫時恢復。本版補強診斷，尚未確認此問題的根因已修復。
+
+### English
+
+- Opening a terminal by hand consumes one matching saved slot instead of accumulating restore entries across restarts. Multiple terminals of the same project remain restorable. The Workspace menu can discard pending slots after confirmation, preserving running work and conversation history.
+- Saved slots that earlier builds duplicated (the same session listed several times) are merged into one on startup, save and restore, so a restore no longer opens a dozen terminals. A button next to "Restore N terminals" also discards the saved terminals.
+- The display startup timeout is extended from 10 to 45 seconds to give multiple terminals more time to initialize on a cold start, reducing premature failures that leave their programs unstarted and sessions queued.
+
+- Fixed managed Codex `/resume`: allow the native picker's second read-only connection and update control state after selecting another conversation.
+- Stop now waits for worker confirmation instead of signalling saved PIDs or claiming exit early; damaged session records no longer abort the entire refresh.
+- Terminal input uses a bounded writer queue. Display failures preserve workers, release output backpressure and disclose missing output. Launch failures retain system error details; packaged self-tests launch a real terminal child.
+- Detach verifies a dedicated tmux control operation instead of trusting titles or keystrokes. Restore previews and confirms program restarts.
+- Diagnostics preserve Windows user-token and private-data ACL error codes and show the failing runtime function instead of only `OSError`.
+- Known issue: the first launch after installation may still report `OSError` in some environments; closing and reopening as a standard user is a temporary workaround. Diagnostics are improved, but the underlying cause is not confirmed fixed.
+
 ## [0.3.0] - 2026-10-15
 
 - 新增：配額方案的「自動繼續」：額度用完而停下的工作，等額度重設後自動接著做（原「等待並驗證恢復」積木改名）。新範本「自動繼續（同一帳號）」不切換帳號，只有一個帳號也能用；沒有「選帳號」的方案不再需要安全交接積木，安全交接改為隨選帳號自動加入或移除。

@@ -1,5 +1,7 @@
 # Vibe Launcher
 
+終端可靠性修正：離開連線與停止操作等待確認結果；顯示故障時保留程式並提示輸出缺漏。受管理的 Codex 終端支援原生 `/resume` 紀錄選單。手動開啟終端會扣除相符的待恢復項目，工作區選單可丟棄不需要的待恢復終端。
+
 [English](README.md) | 繁體中文 | [简体中文](README.zh-CN.md)
 
 桌面啟動器，在本機或 Linux SSH 主機開啟官方 **Codex CLI** 與 **Claude Code**。

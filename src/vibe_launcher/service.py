@@ -64,7 +64,7 @@ QUOTA_FLOW = {"QuotaPolicy", "validate_control_accounts", "validate_codex_contro
               "control_worker_alive", "control_heartbeat_age", "process_alive"}
 CONTROL_ONLY = {"codex_control_status", "codex_control_action"}
 # Tool maintenance, session administration and folder browsing: never reached by a launch or its worker.
-NOT_LAUNCH = {"manage_tools", "update_route", "inspect_tool", "upstream_version", "tool_output", "version_number",
+NOT_LAUNCH = {"detach_session", "manage_tools", "update_route", "inspect_tool", "upstream_version", "tool_output", "version_number",
               "maintenance_env", "list_sessions", "session_action", "stop_direct_session", "browse_listing", "manual_import"}
 # A control request only reads the worker's state and queues a command for it.
 CONTROL_KEEP = QUOTA_FLOW | CONTROL_ONLY | {
@@ -72,11 +72,17 @@ CONTROL_KEEP = QUOTA_FLOW | CONTROL_ONLY | {
     "safe_id", "profile_dir", "account_fits", "quota_supported", "switch_supported", "assert_private_path", "assert_private_paths",
     "protect_path", "private_dir", "read_private", "write_json", "pid_alive", "augmented_path", "user_tool_dirs",
     "_safe_user_dir", "_node_version"}
+QUOTA_KEEP = CONTROL_KEEP | {"prepare", "isolated_env", "api_key", "trusted_executable", "fetch_quota",
+                             "quota_file", "quota_summary", "rpc_rate_limits", "rpc_request", "rpc_requests"}
 
 
 def _shipped(name: str, feature: str) -> bool:
+    if name == "detach_session":
+        return feature == "session"
     if name in WINDOWS_ONLY:
         return False
+    if feature == "quota":
+        return name in QUOTA_KEEP
     if feature == "control":
         return name in CONTROL_KEEP
     if name.startswith("harness_"):
@@ -100,6 +106,10 @@ def _shipped_node(node: ast.stmt, feature: str) -> bool:
 
 def remote_feature(request: dict) -> str:
     """Which helper a request needs (see ``_shipped``)."""
+    if request["action"] == "detach":
+        return "session"
+    if request["action"] == "quota":
+        return "quota"
     if request["action"] in {"github", "harness"}:
         return request["action"]
     if request.get("worker_kind") == "harness":
@@ -209,7 +219,7 @@ def ssh_args(target: str, request: dict, *, root: Path | None = None, environmen
         args += ["-o", "PreferredAuthentications=password", "-o", "KbdInteractiveAuthentication=no", "-o", "PubkeyAuthentication=no"]
     elif mode == "key":
         args += ["-o", "PreferredAuthentications=publickey", "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no"]
-    noninteractive = request["action"] in {"codex-control", "list-sessions", "quota", "browse", "harness", "import-settings", "import-history"} or (request["action"] == "github" and request.get("github_operation") != "login")
+    noninteractive = request["action"] in {"detach", "stop", "codex-control", "list-sessions", "quota", "browse", "harness", "import-settings", "import-history"} or (request["action"] == "github" and request.get("github_operation") != "login")
     args += ["-T" if noninteractive else "-tt", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3"]
     if request.get("login_method") == "browser" and request.get("account", {}).get("tool") == "codex":
         # Re-evaluate with forwarding enabled; refuse any inherited forwards.
@@ -251,7 +261,7 @@ class LauncherService:
               quota_cursor: str = "") -> str | None:
         """Create a job and run it. ``spawn(args, context)`` runs it in a terminal of the caller's choosing (the app's
         built-in terminal); without it the job opens in an external console window. Returns the new session id."""
-        if action not in {"codex-control", "launch", "login", "doctor", "refresh", "attach", "stop", "ssh-settings", "check-tools", "update-tool", "quota", "browse", "github", "harness", "import-settings", "import-history"}:
+        if action not in {"detach", "codex-control", "launch", "login", "doctor", "refresh", "attach", "stop", "ssh-settings", "check-tools", "update-tool", "quota", "browse", "github", "harness", "import-settings", "import-history"}:
             raise ValueError("Unknown action")
         request = {"action": "list-sessions" if action == "refresh" else action,
                    "nonce": uuid.uuid4().hex, "login_method": login_method}
@@ -259,12 +269,13 @@ class LauncherService:
         request["language"] = language()
         if operation is not None:
             operation = dict(operation)
-            allowed = ({"control_action", "target_account_id", "allow_gaps", "align_rules", "policy", "accounts"} if action == "codex-control" else
+            allowed = ({"attachment_nonce"} if action == "detach" else
+                       {"control_action", "target_account_id", "allow_gaps", "align_rules", "policy", "accounts"} if action == "codex-control" else
                        {"github_operation", "github_remote", "github_url", "github_apply", "github_check_access", "github_expected_remote_url", "github_revision", "github_author_name", "github_author_email", "path", "github_new_remote", "harness_operation", "harness_port", "local_port", "project_history"})
-            if action not in {"codex-control", "github", "harness", "import-settings", "import-history"} or operation.keys() - allowed:
+            if action not in {"detach", "codex-control", "github", "harness", "import-settings", "import-history"} or operation.keys() - allowed:
                 raise ValueError("Unsupported operation parameters")
             request.update(operation)
-        if action in {"codex-control", "login", "github", "harness", "import-settings", "import-history"}:
+        if action in {"detach", "codex-control", "login", "github", "harness", "import-settings", "import-history"}:
             request["operation_id"] = uuid.uuid4().hex
         if action in {"check-tools", "update-tool"}:
             request.update(tool=tool, snap_channel=snap_channel)
@@ -352,7 +363,7 @@ class LauncherService:
             raise ValueError("Select an account")
         if action == "launch" and not preset_id:
             raise ValueError("Select a project")
-        if action in {"stop", "attach"} and not session_id:
+        if action in {"detach", "stop", "attach"} and not session_id:
             raise ValueError("Select a session")
         runtime.validate_request(request)
         if environment["kind"] == "ssh":
@@ -380,7 +391,7 @@ class LauncherService:
             if spawn is not None:
                 spawn(args, {"action": action, "mode": session.get("mode", "agent") if action == "attach" else mode, "session_id": request.get("session_id"),
                              "environment_id": environment_id, "preset_id": preset_id, "account_id": account_id,
-                             "operation_id": request.get("operation_id", ""),
+                             "operation_id": request.get("operation_id", ""), "attachment_nonce": request["nonce"],
                              "terminal_profile": session.get("terminal_profile", "") if action == "attach" else request.get("terminal_profile", {}).get("id", ""),
                              "terminal_label": request.get("terminal_profile", {}).get("label", ""),
                              "login_operation": action == "login" or (action == "github" and request.get("github_operation") == "login"),

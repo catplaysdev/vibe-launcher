@@ -118,6 +118,7 @@ def test_stale_or_duplicate_ack_does_not_release_next_batch():
     buffer.take()
     scheduled, presented = [], []
     widget = SimpleNamespace(_disposed=False, _awaiting_write=2, _buffer=buffer,
+                             _display_timer=SimpleNamespace(stop=lambda: None),
                              exit_code=None, _present_timer=SimpleNamespace(start=lambda: presented.append(True)),
                              _schedule_flush=lambda: scheduled.append(True))
     TerminalWidget._on_written(widget, 1)
@@ -134,6 +135,7 @@ def test_exit_output_is_drained_only_after_browser_ack():
     buffer.take()
     drained = []
     widget = SimpleNamespace(_disposed=False, _awaiting_write=1, _buffer=buffer, exit_code=0,
+                             _display_timer=SimpleNamespace(stop=lambda: None),
                              _schedule_flush=lambda: None, _present_timer=SimpleNamespace(start=lambda: None),
                              output_drained=SimpleNamespace(emit=lambda: drained.append(True)))
     assert not TerminalWidget.is_output_drained.fget(widget)

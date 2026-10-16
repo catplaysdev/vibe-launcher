@@ -10,6 +10,7 @@ let SSH work keep running in tmux after you close the window.
 - Accounts never touch your own `~/.codex` / `~/.claude`: each one gets a private profile.
 - Projects are not tied to an account; you pick the account when you open one.
 - Remote work survives disconnects (tmux) and can be re-attached, stopped or recalled later.
+- Detach and stop report verified outcomes; display failures preserve the program and flag missing output. Codex `/resume` supports the native history picker in managed terminals.
 - Sign-in always happens in the official CLI / browser; the launcher never handles OAuth tokens.
 
 ![Workspace: Codex and Claude side by side on an SSH host, with the input bar and quick open](docs/images/workspace-en.png)
@@ -100,7 +101,7 @@ size, `Ctrl+Shift+Space` keyboard navigation. All shortcuts can be changed in **
 - **Workspace**: xterm.js terminals in tabs or a grid, a native input bar for IME input (e.g. Chinese), quick open per
   project, named desktops containing multiple projects, each with its own name and icon (the default one too), a
   workspace switcher that preserves running terminals, workspaces saved as you open and close terminals (a forced
-  close loses nothing; **Restore N terminals** brings them back after a restart, never automatically), a **Reload**
+  close loses nothing; **Restore N terminals** brings them back after a restart, never automatically; opening one by hand consumes its saved slot, and the Workspace menu can discard unwanted saved terminals), a **Reload**
   button per terminal, optional confirmation before reloading or sending from the input bar, shell / CLI profile
   choice, zoomable text.
 - **Accounts and right-click**: each tool's accounts are grouped by environment (this PC first, then servers), and a

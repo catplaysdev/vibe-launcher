@@ -117,16 +117,46 @@ def test_direct_sessions_cannot_be_reattached(tmp_path, monkeypatch):
         runtime.perform({"action": "attach", "session_id": "s", "environment_id": "host"}, root)
 
 
-def test_stopping_a_direct_session_terminates_its_process(tmp_path, monkeypatch):
+def test_stopping_a_direct_session_waits_for_its_owner(tmp_path, monkeypatch):
     root = remote(monkeypatch, tmp_path)
     runtime.write_json(runtime.session_path(root, "s"), {"session_id": "s", "environment_id": "host", "persistent": False,
                                                           "status": "running", "pid": 111})
-    killed = []
-    monkeypatch.setattr(runtime.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(runtime.os, "kill", lambda *a: pytest.fail("saved PIDs must never be signalled"))
+    def worker_exit(_seconds):
+        path = runtime.session_path(root, "s")
+        assert path.with_suffix(".stop").exists()
+        record = json.loads(runtime.read_private(path))
+        runtime.save_status(root, record, "ended")
+    monkeypatch.setattr(runtime.time, "sleep", worker_exit)
     monkeypatch.setattr(runtime, "tmux", lambda *a, **k: pytest.fail("no tmux for a direct session"))
     assert runtime.perform({"action": "stop", "session_id": "s", "environment_id": "host"}, root) == 0
-    assert killed == [(111, runtime.signal.SIGTERM)]
     assert json.loads(runtime.read_private(runtime.session_path(root, "s")))["status"] == "ended"
+
+
+def test_stop_timeout_keeps_request_and_does_not_claim_exit(tmp_path, monkeypatch):
+    root = remote(monkeypatch, tmp_path)
+    path = runtime.session_path(root, "s")
+    runtime.write_json(path, {"session_id": "s", "environment_id": "host", "persistent": False,
+                              "status": "running", "pid": 111})
+    monkeypatch.setattr(runtime, "STOP_CONFIRM_SECONDS", 0)
+    monkeypatch.setattr(runtime.os, "kill", lambda *a: pytest.fail("must not kill an unrelated reused PID"))
+    events = []
+    monkeypatch.setattr(runtime, "emit", lambda _, event: events.append(event))
+    assert runtime.perform({"action": "stop", "session_id": "s", "environment_id": "host"}, root) == 1
+    assert events[-1]["status"] == "unknown"
+    assert json.loads(runtime.read_private(path))["status"] == "running"
+    assert path.with_suffix(".stop").exists()
+
+
+@pytest.mark.parametrize("bad", ["{", "[]", '{"environment_id":"host"}'])
+def test_broken_session_does_not_hide_healthy_sessions(tmp_path, monkeypatch, bad):
+    root = remote(monkeypatch, tmp_path)
+    path = runtime.session_path(root, "bad")
+    runtime.private_dir(path.parent)
+    path.write_text(bad, encoding="utf-8")
+    runtime.write_json(runtime.session_path(root, "good"), {"session_id": "good", "environment_id": "host",
+                                                            "status": "ended"})
+    assert refresh(root, monkeypatch) == {"bad": "unknown", "good": "ended"}
 
 
 def refresh(root, monkeypatch):
@@ -1111,6 +1141,7 @@ def test_a_workspace_of_a_deleted_project_or_account_cannot_be_restarted(drawer_
 
 
 def test_the_workspace_page_offers_the_recall_for_a_project(drawer_view, monkeypatch):
+    monkeypatch.setattr(drawer_view, "_confirm", lambda *a, **k: True)
     add(drawer_view, "dead", "ended", account="b")
     drawer_view.reload()
     assert drawer_view.workspace.launcher.recoverable == {"p": 1}

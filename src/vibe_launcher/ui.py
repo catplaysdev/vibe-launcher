@@ -846,6 +846,7 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QuotaActions, QMain
         self._incomplete_workspaces: set[str] = set()
         self._desktops_ready = False      # nothing is saved before last time's desktops are offered back
         self._pending_slots: dict[str, list[dict]] = {}     # last run's terminals not brought back yet, per desktop
+        self._known_terminal_workspaces: dict[str, str] = {}
         page = WorkspacePage(terminal_factory=self._terminal_factory)
         page.composer_default = self.prefs.composer_default
         page.composer_position = self.prefs.composer_position
@@ -869,7 +870,9 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QuotaActions, QMain
         page.new_workspace_requested.connect(self.new_workspace)
         page.edit_workspace_requested.connect(self.edit_workspace)
         page.restore_pending_requested.connect(self.restore_pending)
+        page.discard_pending_requested.connect(self.discard_pending)
         page.reload_requested.connect(self.reload_terminal)
+        page.detach_requested.connect(self.detach_terminal)
         page.prefs = self.prefs
         page.open_workspace_requested.connect(self.open_workspace)
         page.delete_workspace_requested.connect(self.delete_workspace)
@@ -889,6 +892,21 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QuotaActions, QMain
     def _on_terminals_changed(self) -> None:
         """A terminal opened, closed or moved: the desktops are saved as they are now, and membership, the drawer and
         the Home cards follow."""
+        tabs = self.workspace.tabs()
+        new_tabs = [tab for tab in tabs if self._known_terminal_workspaces.get(tab.info.id) != tab.info.workspace_id]
+        self._known_terminal_workspaces = {tab.info.id: tab.info.workspace_id for tab in tabs}
+        for tab in new_tabs:
+            info = tab.info
+            if not info.preset_id or info.kind not in {"agent", "shell", "attach"}:
+                continue
+            pending = self._pending_slots.get(info.workspace_id, [])
+            matches = [i for i, slot in enumerate(pending) if self._slot_matches_tab(slot, tab)]
+            if matches:
+                # Consume once, when a tab opens. Saving/layout changes must not
+                # consume additional saved terminals of the same project.
+                index = next((i for i in matches if pending[i].get("session_id") == info.session_id), matches[0])
+                pending.pop(index)
+                self.workspace.set_pending(info.workspace_id, len(pending))
         self._remember_workspaces()
         self._prune_local_finished()
         self._render_projects()
@@ -904,7 +922,7 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QuotaActions, QMain
         for workspace_id in page.desktop_ids():
             if not page.has_workspace(workspace_id) or workspace_id in self._incomplete_workspaces:
                 continue
-            slots = (page.slots(workspace_id) + self._pending_slots.get(workspace_id, []))[:16]
+            slots = self._unique_slots(page.slots(workspace_id) + self._pending_slots.get(workspace_id, []))[:16]
             layout = page.desktop_layout(workspace_id)
             if not workspace_id:
                 desktop = {"layout": layout, "slots": slots}
@@ -993,11 +1011,11 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QuotaActions, QMain
             page.set_layout(default["layout"])
         # The default desktop is always loaded, so its saved terminals wait here whatever desktop is shown; otherwise the
         # first save would record it as empty and lose them. Separate-window mode keeps them too, only without the button.
-        pending = {"": list(default.get("slots", []))}
+        pending = {"": self._unique_slots(default.get("slots", []))}
         record = self._by_id("workspaces", self.prefs.last_workspace) if self.prefs.last_workspace else {}
         if record:
             page.switch_workspace(record["id"], record.get("layout", "tabs"))
-            pending[record["id"]] = list(record.get("slots", []))
+            pending[record["id"]] = self._unique_slots(record.get("slots", []))
         embedded = self._embedded_enabled()
         for workspace_id, slots in pending.items():
             if slots:
@@ -1012,8 +1030,47 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QuotaActions, QMain
         self.workspace.set_pending(workspace_id, 0)
         if workspace_id != self.workspace.workspace_id:
             self.open_workspace(workspace_id)
-        self._restore_slots(workspace_id, slots)
+        self._restore_slots(workspace_id, slots, match_existing=False)
         self._remember_workspaces()
+
+    @staticmethod
+    def _unique_slots(slots: list[dict]) -> list[dict]:
+        """A conversation or remote session is one terminal: keep its first slot, drop copies (earlier builds saved a
+        terminal twice when it was opened by hand before Restore, so each restart added more)."""
+        seen: set[str] = set()
+        unique = []
+        for slot in slots:
+            session_id = slot.get("session_id") or ""
+            if session_id and session_id in seen:
+                continue
+            seen.add(session_id)
+            unique.append(slot)
+        return unique
+
+    @staticmethod
+    def _slot_matches_tab(slot: dict, tab) -> bool:
+        info = tab.info
+        kind = "shell" if info.tool == "shell" else "agent"
+        return (slot.get("preset_id") == info.preset_id and slot.get("kind", "agent") == kind
+                and (not slot.get("environment_id") or slot["environment_id"] == info.environment_id)
+                and (kind == "shell" or not slot.get("account_id") or slot["account_id"] == info.account_id)
+                and slot.get("terminal_profile", "") == info.terminal_profile)
+
+    def discard_pending(self, workspace_id: str) -> None:
+        slots = self._pending_slots.get(workspace_id, [])
+        if not slots:
+            return
+        names = "\n".join(self._by_id("presets", slot.get("preset_id", "")).get("name", tr("Deleted project"))
+                          for slot in slots)
+        message = tr("Discard {count} saved terminal(s) from this workspace? Running work and conversation history are kept.",
+                     count=len(slots)) + "\n\n" + names
+        if not self._confirm(tr("Discard saved terminals"), message, confirm_text=tr("Discard"), danger=True):
+            return
+        self._pending_slots.pop(workspace_id, None)
+        self.workspace.set_pending(workspace_id, 0)
+        self._remember_workspaces()
+        self._render_projects()
+        self._render_home()
 
     def reload_terminal(self, tab_id: str) -> None:
         """Start a terminal again in place: tmux work is re-attached, anything else restarts (agents resume)."""
@@ -1364,18 +1421,47 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QuotaActions, QMain
             return
         self._restore_slots(workspace_id, workspace.get("slots", []))
 
-    def _restore_slots(self, workspace_id: str, slots: list[dict]) -> None:
+    def _restore_slots(self, workspace_id: str, slots: list[dict], *, match_existing: bool = True) -> None:
         """Bring a desktop's saved terminals back: re-attach work still running on a server, start the rest again
         (Codex / Claude continue their last conversation)."""
+        slots = self._unique_slots(slots)
         opened = skipped = 0
         failed: list[dict] = []
         used_sessions = self._open_session_ids()
+        planned = {}
+        reserved = set(used_sessions)
+        descriptions = []
+        # Pending slots already had newly opened tabs deducted when they opened.
+        existing = list(self.workspace.desktop_tabs(workspace_id)) if match_existing else []
+        for slot in slots:
+            project = self._by_id("presets", slot.get("preset_id", ""))
+            kind, account_id = slot.get("kind", "agent"), slot.get("account_id", "")
+            match = next((tab for tab in existing if self._slot_matches_tab(slot, tab)), None)
+            if not project or match is not None:
+                if match is not None:
+                    existing.remove(match)
+                continue
+            step = next((candidate for candidate in self._restore_steps(project["id"])
+                         if candidate.session["id"] not in reserved
+                         and candidate.session.get("mode", "agent") == kind
+                         and candidate.session.get("environment_id") == project.get("environment_id")
+                         and (kind == "shell" or candidate.session.get("account_id") == account_id)
+                         and candidate.session.get("terminal_profile", "") == slot.get("terminal_profile", "")), None)
+            planned[id(slot)] = step
+            if step:
+                reserved.add(step.session["id"])
+            verb = tr("Reconnect") if step and step.action == "attach" else tr("Restart program")
+            descriptions.append(f"{verb}: {project['name']}")
+        if any(step is None or step.action != "attach" for step in planned.values()):
+            if not self._confirm(tr("Restore terminals"), "\n".join(descriptions), confirm_text=tr("Restore")):
+                waiting = [slot for slot in slots if id(slot) in planned]
+                self._pending_slots[workspace_id] = waiting
+                self.workspace.set_pending(workspace_id, len(waiting))
+                return
         for slot in slots:
             project = self._by_id("presets", slot.get("preset_id", ""))
             kind = slot.get("kind", "agent")
-            if project and any(tab.info.preset_id == project["id"] and ("shell" if tab.info.tool == "shell" else "agent") == kind
-                               and (kind == "shell" or not slot.get("account_id") or tab.info.account_id == slot["account_id"])
-                               for tab in self.workspace.desktop_tabs(workspace_id)):
+            if project and id(slot) not in planned:
                 continue                    # already open here (opened by hand before restoring): no second copy
             count = len(self.workspace.desktop_tabs(workspace_id))
             if project:
@@ -1383,12 +1469,7 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QuotaActions, QMain
                 if slot.get("environment_id") and slot.get("environment_id") != project.get("environment_id"):
                     account_id = ""         # saved before projects were tied to one host: open on the project's own, and pick again
                 # Reuse a recoverable run after a launcher restart instead of creating another remote job.
-                candidates = self._restore_steps(project["id"])
-                step = next((step for step in candidates if step.session["id"] not in used_sessions
-                             and step.session.get("mode", "agent") == slot.get("kind", "agent")
-                             and step.session.get("environment_id") == project.get("environment_id")
-                             and (slot.get("kind") == "shell" or step.session.get("account_id") == account_id)
-                             and step.session.get("terminal_profile", "") == slot.get("terminal_profile", "")), None)
+                step = planned.get(id(slot))
                 if step:
                     used_sessions.add(step.session["id"])
                     self._attach_step(step) if step.action == "attach" else self._relaunch(step.session)
@@ -2129,7 +2210,7 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QuotaActions, QMain
             has_any = any(s.get("preset_id") == preset_id for s in self._records.get("sessions", []))
             self._notice(tr('ui.ecb5287a6979') if has_any else tr('ui.574742c2cc06'))
             return
-        if len(steps) > 1:
+        if len(steps) > 1 or any(step.action == "relaunch" for step in steps):
             lines = "\n".join("・" + self._describe_step(step) for step in steps)
             if not self._confirm(tr('ui.936eb92431ac'), tr('ui.7aabf9d080ac', v0=f"{_value(project, 'name')}", v1=f'{len(steps)}', v2=f'{lines}'),
                                  confirm_text=tr('ui.b927a75b85c9')):
@@ -2157,6 +2238,9 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QuotaActions, QMain
                 return True
             ended = next((t for t in page.desktop_tabs(workspace_id) if t.info.preset_id == preset_id), None)
             if ended is not None:                       # still on that desktop, finished: start it again in its place
+                if not self._confirm(tr("Restart program"), tr("This starts the program again and continues its conversation. It does not reconnect to a running process."),
+                                     confirm_text=tr("Restart")):
+                    return True
                 if workspace_id != page.workspace_id:
                     self.open_workspace(workspace_id)
                 if page.workspace_id == workspace_id:
@@ -2950,6 +3034,14 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QuotaActions, QMain
             runtime_module.assert_private_path(self.store.path.parent / "diagnostics" / ("launcher.log." + str(index)))
         logger.warning("%s: %s", operation, type(error).__name__)
 
+    def detach_terminal(self, tab_id: str) -> None:
+        tab = self.workspace.tab(tab_id)
+        if tab is None:
+            return
+        self._start_operation("detach", {"session_id": tab.info.session_id,
+                              "operation": {"attachment_nonce": tab.info.attachment_nonce}},
+                              lambda result: self.workspace.confirm_detach(tab_id, result), quiet=True)
+
     def _start_operation(self, action: str, kwargs: dict, callback, *, quiet: bool = False) -> None:
         try:
             operation_id = self.service.start(action, **kwargs, spawn=self.workspace.spawn if self._embedded_enabled() else None)
@@ -2983,7 +3075,7 @@ class VibeLauncherWindow(SessionActions, IntegrationActions, QuotaActions, QMain
                 if info.get("login"):
                     self._login_result(operation_id, payload["result"] if payload["runner_exit_code"] == 0 else {"status": "failed"}, info.get("embedded", False))
                 info["callback"](payload["result"])
-            elif time.monotonic() - info["since"] > 900:
+            elif time.monotonic() - info["since"] > (10 if info["action"] == "detach" else 900):
                 del self._operations[operation_id]
                 info["callback"]({"status": "unknown", "message": tr('ui.ea2fe04e5cf9')})
 
